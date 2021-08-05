@@ -2,6 +2,7 @@ import copy
 import time
 import random
 import numpy as np
+from tqdm import tqdm
 from typing import Iterable, Callable
 
 import pytorch_lightning as pl
@@ -48,33 +49,9 @@ class Dreamer(pl.LightningModule):
         self.max_length = config['max_length']
         self.length = config['length']
         self.timesteps = config['timesteps']
-    
-
-    def forward(self, batch):
-        return None
-    
-    def training_step(self, 
-                        batch, 
-                        batch_idx, 
-                        optimizer_idx):
-        return None
-    
-    def lambda_return(self, reward, value, pcont, bootstrap, lambda_):
-        def agg_fn(x, y):
-            return y[0] + y[1] * lambda_ * x
-
-        next_values = torch.cat([value[1:], bootstrap[None]], dim=0)
-        inputs = reward + pcont * next_values * (1 - lambda_)
-
-        last = bootstrap
-        returns = []
-        for i in reversed(range(len(inputs))):
-            last = agg_fn(last, [inputs[i], pcont[i]])
-            returns.append(last)
-
-        returns = list(reversed(returns))
-        returns = torch.stack(returns, dim=0)
-        return returns
+        self.fill_batches = []
+        prefill_episodes = self._prefill_train_batch()
+        self._add(prefill_episodes)
 
     def compute_dreamer_loss(self,
                          obs,
@@ -135,7 +112,7 @@ class Dreamer(pl.LightningModule):
             reward = self.model.reward(imag_feat).mean
             value = self.model.value(imag_feat).mean
         pcont = discount * torch.ones_like(reward)
-        returns = self.lambda_return(reward[:-1], value[:-1], pcont[:-1], value[-1],
+        returns = self._lambda_return(reward[:-1], value[:-1], pcont[:-1], value[-1],
                                 lambda_)
         discount_shape = pcont[:1].size()
         discount = torch.cumprod(
@@ -157,7 +134,7 @@ class Dreamer(pl.LightningModule):
 
         log_gif = None
         if log:
-            log_gif = self.log_summary(obs, action, latent, image_pred)
+            log_gif = self._log_summary(obs, action, latent, image_pred)
 
         return_dict = {
             "model_loss": model_loss,
@@ -173,18 +150,6 @@ class Dreamer(pl.LightningModule):
         if log_gif is not None:
             return_dict["log_gif"] = log_gif
         return return_dict
-
-    def log_summary(self, obs, action, embed, image_pred):
-        truth = obs[:6] + 0.5
-        recon = image_pred.mean[:6]
-        init, _ = self.model.dynamics.observe(embed[:6, :5], action[:6, :5])
-        init = [itm[:, -1] for itm in init]
-        prior = self.model.dynamics.imagine(action[:6, 5:], init)
-        openl = self.model.decoder(self.model.dynamics.get_feature(prior)).mean
-
-        mod = torch.cat([recon[:, :5] + 0.5, openl + 0.5], 1)
-        error = (mod - truth + 1.0) / 2.0
-        return torch.cat([truth, mod, error], 3)
 
     def dreamer_loss(self, train_batch):
         log_gif = False
@@ -208,8 +173,122 @@ class Dreamer(pl.LightningModule):
 
         return (loss_dict["model_loss"], loss_dict["actor_loss"],
                 loss_dict["critic_loss"])
+    
+    def _prefill_train_batch(self, ):
+        self.timesteps = 0
+        dict_keys = ['count', 'obs', 'action', 'reward', 'done']
+        obs = self.env.reset()
+        episode_obs = [obs]
+        episode_action = [0]
+        episode_reward = [0]
+        episode_done = [False]
+        episode_count = 1
+        episode_dict = {}
+        episodes = []
+        
+        def initialize(obs):
+            episode_obs = [obs]
+            episode_action = [0]
+            episode_reward = [0]
+            episode_done = [False]
+            episode_count = 1
+            episode_dict = {}
+        
+        while self.timesteps <= int(self.config["prefill_timesteps"] / self.config["action_repeat"]):    
+            action, logp, state = self.action_sampler_fn(obs, None, False, self.timesteps)
+            obs, reward, done, _ = self.env.step(action)
+            episode_count += 1
+            episode_obs.append(obs)
+            episode_action.append(action)
+            episode_done.append(done)
+            episode_reward.append(reward)
+            if done:
+                episode_dict.update({'count': episode_count,
+                                'obs': np.stack(episode_obs),
+                                'action': np.stack(episode_action),
+                                'reward': np.stack(episode_reward),
+                                'done': np.stack(episode_done)})
+                obs = self.env.reset()
+                initialize(obs)
+                episodes.append(episode_dict)
+            self.timesteps += 1
+        return episodes
+    
+    def _data_collect(self):
+        obs = self.env.reset()
+        episode_obs = [obs]
+        episode_action = [0]
+        episode_reward = [0]
+        episode_done = [False]
+        episode_count = 1
+        episode_dict = {}
+        episodes = []
+        
+        def initialize(obs):
+            episode_obs = [obs]
+            episode_action = [0]
+            episode_reward = [0]
+            episode_done = [False]
+            episode_count = 1
+            episode_dict = {}
+        
+        for i in tqdm(range(self.config["max_episode_length"] / self.config["action_repeat"])):    
+            action, logp, state = self.action_sampler_fn(obs, None, False, self.timesteps)
+            obs, reward, done, _ = self.env.step(action)
+            episode_count += 1
+            episode_obs.append(obs)
+            episode_action.append(action)
+            episode_done.append(done)
+            episode_reward.append(reward)
+            if done:
+                episode_dict.update({'count': episode_count,
+                                'obs': np.stack(episode_obs),
+                                'action': np.stack(episode_action),
+                                'reward': np.stack(episode_reward),
+                                'done': np.stack(episode_done)})
+                obs = self.env.reset()
+                initialize(obs)
+                episodes.append(episode_dict)
+            self.timesteps += 1
+        return episodes
 
-
+    def _add(self, batch):
+        for b in batch:
+            self.timesteps += b["count"]
+        self.episodes.extend(batch)
+        if len(self.episodes) > self.max_length:
+            remove_episode_index = len(self.episodes) - self.max_length
+            self.episodes = self.episodes[remove_episode_index:]
+    
+    def _sample(self, batch_size):
+        episodes_buffer = [] #{"count": 0, "obs": [], "reward": [], "action": [], "done": []}
+        while len(episodes_buffer) < batch_size:
+            rand_index = random.randint(0, len(self.episodes) - 1)
+            episode = self.episodes[rand_index]
+            if episode["count"] < self.length:
+                continue
+            available = episode["count"] - self.length
+            index = int(random.randint(0, available))
+            episodes_buffer.append({"count": self.length,
+                                    "obs": episode["obs"][index : index + self.length], 
+                                    "action": episode["action"][index: index + self.length],
+                                    "reward": episode["reward"][index: index + self.length],
+                                    "done": episode["done"][index: index + self.length]})
+        # return episodes_buffer
+        total_batch = {}
+        for k in episodes_buffer[0].keys():
+            total_batch[k] = np.stack([e[k] for e in episodes_buffer], axis=0)
+        return total_batch
+    
+    def _batch(self, batch_size):
+        for _ in range(self.config["collect_interval"]):
+            total_batch = self._sample(batch_size)
+            def return_batch(i):
+                return total_batch["count"][i], total_batch["obs"][i], \
+                    total_batch["action"][i], total_batch["reward"][i], total_batch["done"][i]
+            for i in range(batch_size):
+                yield return_batch(i)
+    
     def action_sampler_fn(self, obs, state, explore, timestep):
         """Action sampler function has two phases. During the prefill phase,
         actions are sampled uniformly [-1, 1]. During training phase, actions
@@ -236,75 +315,30 @@ class Dreamer(pl.LightningModule):
 
         return action, logp, state
     
-    def _prefill_train_batch(self, ):
-        self.timesteps = 0
-        dict_keys = ['count', 'obs', 'action', 'reward', 'done']
-        obs = self.env.reset()
-        episode_obs = [obs]
-        episode_action = [0]
-        episode_reward = [0]
-        episode_done = [False]
-        episode_count = 1
-        episode_dict = {}
-        
-        def initialize(obs):
-            episode_obs = [obs]
-            episode_action = [0]
-            episode_reward = [0]
-            episode_done = [False]
-            episode_count = 1
-            episode_dict = {}
-        
-        while self.timesteps <= int(self.config["prefill_timesteps"] / self.config["action_repeat"]):    
-            action, logp, state = self.action_sampler_fn(obs, None, False, self.timesteps)
-            obs, reward, done, _ = self.env.step(action)
-            episode_count += 1
-            episode_obs.append(obs)
-            episode_action.append(action)
-            episode_done.append(done)
-            episode_reward.append(reward)
-            if done:
-                episode_dict.update({'count': episode_count,
-                                'obs': np.stack(episode_obs),
-                                'action': np.stack(episode_action),
-                                'reward': np.stack(episode_reward),
-                                'done': np.stack(episode_done)})
-                obs = self.env.reset()
-                initialize(obs)
-                self.episodes.append(episode_dict)
-            self.timesteps += 1
+    def training_step(self, batch):
+        obs, action, reward, _ = batch
+        self.state = self.model.get_initial_state()
+        action, _, self.state = self.action_sampler_fn(obs, self.state, self.explore, self.timesteps)
+        loss = self.dreamer_loss({"obs":obs, "action":action, "reward":reward})
+        return sum(list(loss))
+    
+    def training_epoch_end(self, outputs):
+        data_collection_episodes = self._data_collect()
+        self._add(data_collection_episodes)
 
-    def _add(self, batch):
-        for b in batch:
-            self.timesteps += b["count"]
-        self.episodes.extend(batch)
-        if len(self.episodes) > self.max_length:
-            remove_episode_index = len(self.episodes) - self.max_length
-            self.episodes = self.episodes[remove_episode_index:]
+    def _dataloader(self) -> DataLoader:
+        """Initialize the Replay Buffer dataset used for retrieving experiences"""
+        dataset = ExperienceSourceDataset(self.train_batch)
+        dataloader = DataLoader(dataset=dataset, batch_size=self.batch_size)
+        return dataloader
+
+    def train_dataloader(self) -> DataLoader:
+        """Get train loader"""
+        return self._dataloader()
     
-    def _sample(self, batch_size):
-        episodes_buffer = [] #{"count": 0, "obs": [], "reward": [], "action": [], "done": []}
-        while len(episodes_buffer) < batch_size:
-            rand_index = random.randint(0, len(self.episodes) - 1)
-            episode = self.episodes[rand_index]
-            if episode["count"] < self.length:
-                continue
-            available = episode["count"] - self.length
-            index = int(random.randint(0, available))
-            episodes_buffer.append({"obs": episode["obs"][index : index + self.length], 
-                                    "action": episode["action"][index: index + self.length],
-                                    "reward": episode["reward"][index: index + self.length],
-                                    "done": episode["done"][index: index + self.length]})
-        total_batch = {}
-        for k in episodes_buffer[0].keys():
-            total_batch[k] = np.stack([e[k] for e in episodes_buffer], axis=0)
-        return total_batch
-    
-    def postprocess_gif(self, gif: np.ndarray):
-        gif = np.clip(255 * gif, 0, 255).astype(np.uint8)
-        B, T, C, H, W = gif.shape
-        frames = gif.transpose((1, 2, 3, 0, 4)).reshape((1, T, C, H, B * W))
-        return frames
+    def val_dataloader(self) -> DataLoader:
+        """ Get val loader"""
+        return self._dataloader()
     
     def configure_optimizers(self,):
         encoder_weights = list(self.model.encoder.parameters())
@@ -320,36 +354,37 @@ class Dreamer(pl.LightningModule):
         critic_opt = Adam(critic_weights, lr=self.config["critic_lr"])
         return [model_opt, actor_opt, critic_opt]
     
-    def _batch(self, batch_size):
-        for _ in range(self.config["collect_interval"]):
-            total_batch = self._sample(batch_size)
-            for i in range(batch_size):
-                yield total_batch["obs"][i],  total_batch["action"][i], total_batch["reward"][i], total_batch["done"][i]
+    def _postprocess_gif(self, gif: np.ndarray):
+        gif = np.clip(255 * gif, 0, 255).astype(np.uint8)
+        B, T, C, H, W = gif.shape
+        frames = gif.transpose((1, 2, 3, 0, 4)).reshape((1, T, C, H, B * W))
+        return frames
     
-    def training_step(self, batch):
-        obs, action, reward, _ = batch
-        self.state = self.model.get_initial_state()
-        action, _, self.state = self._action_sampler(obs, self.state, self.explore, self.timesteps)
-        loss = self.dreamer_loss({"obs":obs, "action":action, "reward":reward})
-        return sum(list(loss))
-    
-    def validation_step(self, batch):
-        obs, action, reward, _ = batch
-        self.state = self.model.get_initial_state()
-        action, _, self.state = self._action_sampler(obs, self.state, self.explore, self.timesteps)
-        loss = self.dreamer_loss({"obs":obs, "action":action, "reward":reward})
-        return sum(list(loss))
+    def _log_summary(self, obs, action, embed, image_pred):
+        truth = obs[:6] + 0.5
+        recon = image_pred.mean[:6]
+        init, _ = self.model.dynamics.observe(embed[:6, :5], action[:6, :5])
+        init = [itm[:, -1] for itm in init]
+        prior = self.model.dynamics.imagine(action[:6, 5:], init)
+        openl = self.model.decoder(self.model.dynamics.get_feature(prior)).mean
 
-    def _dataloader(self) -> DataLoader:
-        """Initialize the Replay Buffer dataset used for retrieving experiences"""
-        dataset = ExperienceSourceDataset(self.train_batch)
-        dataloader = DataLoader(dataset=dataset, batch_size=self.batch_size)
-        return dataloader
-
-    def train_dataloader(self) -> DataLoader:
-        """Get train loader"""
-        return self._dataloader()
+        mod = torch.cat([recon[:, :5] + 0.5, openl + 0.5], 1)
+        error = (mod - truth + 1.0) / 2.0
+        return torch.cat([truth, mod, error], 3)
     
-    def val_dataloader(self) -> DataLoader:
-        """ Get val loader"""
-        return self._dataloader()
+    def _lambda_return(self, reward, value, pcont, bootstrap, lambda_):
+        def agg_fn(x, y):
+            return y[0] + y[1] * lambda_ * x
+
+        next_values = torch.cat([value[1:], bootstrap[None]], dim=0)
+        inputs = reward + pcont * next_values * (1 - lambda_)
+
+        last = bootstrap
+        returns = []
+        for i in reversed(range(len(inputs))):
+            last = agg_fn(last, [inputs[i], pcont[i]])
+            returns.append(last)
+
+        returns = list(reversed(returns))
+        returns = torch.stack(returns, dim=0)
+        return returns
