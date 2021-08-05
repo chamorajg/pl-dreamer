@@ -216,6 +216,7 @@ class Dreamer(pl.LightningModule):
     
     def _data_collect(self):
         obs = self.env.reset()
+        state = self.model.get_initial_state()
         episode_obs = [obs]
         episode_action = [0]
         episode_reward = [0]
@@ -233,23 +234,23 @@ class Dreamer(pl.LightningModule):
             episode_dict = {}
         
         for i in tqdm(range(self.config["max_episode_length"] / self.config["action_repeat"])):    
-            action, logp, state = self.action_sampler_fn(obs, None, False, self.timesteps)
+            action, logp, state = self.action_sampler_fn(obs, state, self.config["explore"], self.timesteps)
             obs, reward, done, _ = self.env.step(action)
             episode_count += 1
             episode_obs.append(obs)
             episode_action.append(action)
             episode_done.append(done)
             episode_reward.append(reward)
+            self.timesteps += 1
             if done:
                 episode_dict.update({'count': episode_count,
                                 'obs': np.stack(episode_obs),
                                 'action': np.stack(episode_action),
                                 'reward': np.stack(episode_reward),
                                 'done': np.stack(episode_done)})
-                obs = self.env.reset()
-                initialize(obs)
                 episodes.append(episode_dict)
-            self.timesteps += 1
+                break
+            
         return episodes
 
     def _add(self, batch):
@@ -311,7 +312,7 @@ class Dreamer(pl.LightningModule):
             action = Normal(action, self.config["explore_noise"]).sample()
             action = torch.clamp(action, min=-1.0, max=1.0)
 
-        self.global_timestep += self.config["action_repeat"]
+        self.timesteps += 1
 
         return action, logp, state
     
@@ -323,8 +324,13 @@ class Dreamer(pl.LightningModule):
         return sum(list(loss))
     
     def training_epoch_end(self, outputs):
-        data_collection_episodes = self._data_collect()
-        self._add(data_collection_episodes)
+        with torch.no_grad():
+            data_collection_episodes = self._data_collect()
+            self._add(data_collection_episodes)
+
+        if self.current_epoch % self.config["test_interval"] == 0:
+            self.model.eval()
+            test_data = self._data_collect()
 
     def _dataloader(self) -> DataLoader:
         """Initialize the Replay Buffer dataset used for retrieving experiences"""
