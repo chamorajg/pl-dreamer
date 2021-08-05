@@ -1,2 +1,2 @@
 # Pytorch-Dreamer
-Simplistic Pytorch Implementation of the Dreamer-RL
+Simplistic Pytorch Lightning Implementation of the Dreamer-RL

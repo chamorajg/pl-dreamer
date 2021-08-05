@@ -2,286 +2,354 @@ import copy
 import time
 import random
 import numpy as np
+from typing import Iterable, Callable
 
+import pytorch_lightning as pl
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import multiprocessing
+
+
 from torch.optim import Adam
-from torch.multiprocessing import Queue
-from torch.distributions import Categorical, normal
+from torch.utils.data import DataLoader, IterableDataset
+from torch.distributions import Categorical, Normal
 
-from planet import PLANet
-
-
-def move_gradients_one_model_to_another(from_model, to_model, set_from_gradients_to_zero=False):
-        """Copies gradients from from_model to to_model"""
-        for from_model, to_model in zip(from_model.parameters(), to_model.parameters()):
-            to_model._grad = from_model.grad.clone()
-            if set_from_gradients_to_zero: from_model._grad = None
+from planet import PLANet, FreezeParameters
 
 
-def copy_model_over(from_model, to_model):
-    """Copies model parameters from from_model to to_model"""
-    for to_model, from_model in zip(to_model.parameters(), from_model.parameters()):
-        to_model.data.copy_(from_model.data.clone())
+class ExperienceSourceDataset(IterableDataset):
+    """
+    Implementation from PyTorch Lightning Bolts:
+    https://github.com/PyTorchLightning/pytorch-lightning-bolts/blob/master/pl_bolts/datamodules/experience_source.py
+    Basic experience source dataset. Takes a generate_batch function that returns an iterator.
+    The logic for the experience source and how the batch is generated is defined the Lightning model itself
+    """
 
-def create_actor_distribution(action_types, actor_output, action_size):
-    """Creates a distribution that the actor can then use to randomly draw actions"""
-    if action_types == "DISCRETE":
-        assert actor_output.size()[1] == action_size, "Actor output the wrong size"
-        action_distribution = Categorical(actor_output)  # this creates a distribution to sample from
-    else:
-        assert actor_output.size()[1] == action_size * 2, "Actor output the wrong size"
-        means = actor_output[:, :action_size].squeeze(0)
-        stds = actor_output[:,  action_size:].squeeze(0)
-        if len(means.shape) == 2: means = means.squeeze(-1)
-        if len(stds.shape) == 2: stds = stds.squeeze(-1)
-        if len(stds.shape) > 1 or len(means.shape) > 1:
-            raise ValueError("Wrong mean and std shapes - {} -- {}".format(stds.shape, means.shape))
-        action_distribution = normal.Normal(means.squeeze(0), torch.abs(stds))
-    return action_distribution
+    def __init__(self, generate_batch: Callable):
+        self.generate_batch = generate_batch
 
-class Dreamer(object):
+    def __iter__(self) -> Iterable:
+        iterator = self.generate_batch()
+        return iterator
+
+class Dreamer(pl.LightningModule):
 
     agent_name = "dreamer"
-    def __init__(self, config):
-        super(Dreamer, self).__init__(config)
-        self.num_processes = multiprocessing.cpu_count()
-        self.worker_processes = min( max(1, self.num_processes - 2),
-                                        config['num_workers'])
-        self.dreamer = PLANet(input_dim, output_dim)
-        self.dreamer_optimizer = Adam(self.dreamer.parameters(), lr=self.config.learning_rate, eps=1e-4)
+    def __init__(self, 
+                    config):
+        super().__init__()
+        self.save_hyperparameters()
+        self.agent = PLANet(config['obs_space'], config['action_space'], 
+                            config['num_outputs'], config['model_config'],
+                            config['name'])
+        self.model = self.agent
+        self.episodes = []
+        self.max_length = config['max_length']
+        self.length = config['length']
+        self.timesteps = config['timesteps']
     
-    def run_n_episodes(self):
-        """ Runs game to completion n times."""
-        start = time.time()
-        results_queue = Queue()
-        gradient_updates_queue = Queue()
-        episode_numer = multiprocessing.Value('i', 0)
-        self.optimizer_lock = multiprocessing.Lock()
-        episodes_per_process = int(self.config.num_episodes_to_run / self.worker_processes) + 1
-        processes = []
-        self.dreamer.share_memory()
-        self.dreamer_optimizer.share_memory()
 
-        optimizer_worker = multiprocessing.Process(target=self.update_shared_model, args=(gradient_updates_queue,))
-        optimizer_worker.start()
+    def forward(self, batch):
+        return None
+    
+    def training_step(self, 
+                        batch, 
+                        batch_idx, 
+                        optimizer_idx):
+        return None
+    
+    def lambda_return(self, reward, value, pcont, bootstrap, lambda_):
+        def agg_fn(x, y):
+            return y[0] + y[1] * lambda_ * x
 
-        for process_num in range(self.worker_processes):
-            worker = DreamerWorker(process_num, copy.deepcopy(self.environment), self.actor_critic, episode_number, self.optimizer_lock,
-                                    self.actor_critic_optimizer, self.config, episodes_per_process,
-                                    self.hyperparameters["epsilon_decay_rate_denominator"],
-                                    self.action_size, self.action_types,
-                                    results_queue, copy.deepcopy(self.actor_critic), gradient_updates_queue)
-            worker.start()
-            processes.append(worker)
-        self.print_results(episode_number, results_queue)
-        for worker in processes:
-            worker.join()
-        optimizer_worker.kill()
+        next_values = torch.cat([value[1:], bootstrap[None]], dim=0)
+        inputs = reward + pcont * next_values * (1 - lambda_)
 
-        time_taken = time.time() - start
-        return self.game_full_episode_scores, self.rolling_results, time_taken
+        last = bootstrap
+        returns = []
+        for i in reversed(range(len(inputs))):
+            last = agg_fn(last, [inputs[i], pcont[i]])
+            returns.append(last)
 
-    def print_results(self, episode_number, results_queue):
-        """Worker that prints out results as they get put into a queue"""
-        while True:
-            with episode_number.get_lock():
-                carry_on = episode_number.value < self.config.num_episodes_to_run
-            if carry_on:
-                if not results_queue.empty():
-                    self.total_episode_score_so_far = results_queue.get()
-                    self.save_and_print_result()
-            else: break
+        returns = list(reversed(returns))
+        returns = torch.stack(returns, dim=0)
+        return returns
 
-    def update_shared_model(self, gradient_updates_queue):
-        """Worker that updates the shared model with gradients as they get put into the queue"""
-        while True:
-            gradients = gradient_updates_queue.get()
-            with self.optimizer_lock:
-                self.actor_critic_optimizer.zero_grad()
-                for grads, params in zip(gradients, self.actor_critic.parameters()):
-                    params._grad = grads  # maybe need to do grads.clone()
-                self.actor_critic_optimizer.step()
+    def compute_dreamer_loss(self,
+                         obs,
+                         action,
+                         reward,
+                         imagine_horizon,
+                         discount=0.99,
+                         lambda_=0.95,
+                         kl_coeff=1.0,
+                         free_nats=3.0,
+                         log=False):
+        """Constructs loss for the Dreamer objective
+            Args:
+                obs (TensorType): Observations (o_t)
+                action (TensorType): Actions (a_(t-1))
+                reward (TensorType): Rewards (r_(t-1))
+                model (TorchModelV2): DreamerModel, encompassing all other models
+                imagine_horizon (int): Imagine horizon for actor and critic loss
+                discount (float): Discount
+                lambda_ (float): Lambda, like in GAE
+                kl_coeff (float): KL Coefficient for Divergence loss in model loss
+                free_nats (float): Threshold for minimum divergence in model loss
+                log (bool): If log, generate gifs
+            """
+        encoder_weights = list(self.model.encoder.parameters())
+        decoder_weights = list(self.model.decoder.parameters())
+        reward_weights = list(self.model.reward.parameters())
+        dynamics_weights = list(self.model.dynamics.parameters())
+        critic_weights = list(self.model.value.parameters())
+        model_weights = list(encoder_weights + decoder_weights + reward_weights +
+                            dynamics_weights)
+
+        device = (torch.device("cuda")
+                if torch.cuda.is_available() else torch.device("cpu"))
+
+        # PlaNET Model Loss
+        latent = self.model.encoder(obs)
+        post, prior = self.model.dynamics.observe(latent, action)
+        features = self.model.dynamics.get_feature(post)
+        image_pred = self.model.decoder(features)
+        reward_pred = self.model.reward(features)
+        image_loss = -torch.mean(image_pred.log_prob(obs))
+        reward_loss = -torch.mean(reward_pred.log_prob(reward))
+        prior_dist = self.model.dynamics.get_dist(prior[0], prior[1])
+        post_dist = self.model.dynamics.get_dist(post[0], post[1])
+        div = torch.mean(
+            torch.distributions.kl_divergence(post_dist, prior_dist).sum(dim=2))
+        div = torch.clamp(div, min=free_nats)
+        model_loss = kl_coeff * div + reward_loss + image_loss
+
+        # Actor Loss
+        # [imagine_horizon, batch_length*batch_size, feature_size]
+        with torch.no_grad():
+            actor_states = [v.detach() for v in post]
+        with FreezeParameters(model_weights):
+            imag_feat = self.model.imagine_ahead(actor_states, imagine_horizon)
+        with FreezeParameters(model_weights + critic_weights):
+            reward = self.model.reward(imag_feat).mean
+            value = self.model.value(imag_feat).mean
+        pcont = discount * torch.ones_like(reward)
+        returns = self.lambda_return(reward[:-1], value[:-1], pcont[:-1], value[-1],
+                                lambda_)
+        discount_shape = pcont[:1].size()
+        discount = torch.cumprod(
+            torch.cat([torch.ones(*discount_shape).to(device), pcont[:-2]], dim=0),
+            dim=0)
+        actor_loss = -torch.mean(discount * returns)
+
+        # Critic Loss
+        with torch.no_grad():
+            val_feat = imag_feat.detach()[:-1]
+            target = returns.detach()
+            val_discount = discount.detach()
+        val_pred = self.model.value(val_feat)
+        critic_loss = -torch.mean(val_discount * val_pred.log_prob(target))
+
+        # Logging purposes
+        prior_ent = torch.mean(prior_dist.entropy())
+        post_ent = torch.mean(post_dist.entropy())
+
+        log_gif = None
+        if log:
+            log_gif = self.log_summary(obs, action, latent, image_pred)
+
+        return_dict = {
+            "model_loss": model_loss,
+            "reward_loss": reward_loss,
+            "image_loss": image_loss,
+            "divergence": div,
+            "actor_loss": actor_loss,
+            "critic_loss": critic_loss,
+            "prior_ent": prior_ent,
+            "post_ent": post_ent,
+        }
+
+        if log_gif is not None:
+            return_dict["log_gif"] = log_gif
+        return return_dict
+
+    def log_summary(self, obs, action, embed, image_pred):
+        truth = obs[:6] + 0.5
+        recon = image_pred.mean[:6]
+        init, _ = self.model.dynamics.observe(embed[:6, :5], action[:6, :5])
+        init = [itm[:, -1] for itm in init]
+        prior = self.model.dynamics.imagine(action[:6, 5:], init)
+        openl = self.model.decoder(self.model.dynamics.get_feature(prior)).mean
+
+        mod = torch.cat([recon[:, :5] + 0.5, openl + 0.5], 1)
+        error = (mod - truth + 1.0) / 2.0
+        return torch.cat([truth, mod, error], 3)
+
+    def dreamer_loss(self, train_batch):
+        log_gif = False
+        if "log_gif" in train_batch:
+            log_gif = True
+
+        self.stats_dict = self.compute_dreamer_loss(
+            train_batch["obs"],
+            train_batch["actions"],
+            train_batch["rewards"],
+            self.model,
+            self.config["imagine_horizon"],
+            self.config["discount"],
+            self.config["lambda"],
+            self.config["kl_coeff"],
+            self.config["free_nats"],
+            log_gif,
+        )
+
+        loss_dict = self.stats_dict
+
+        return (loss_dict["model_loss"], loss_dict["actor_loss"],
+                loss_dict["critic_loss"])
 
 
-class DreamerWorker(torch.multiprocessing.Process):
-    """Dreamer worker that will play the game for the designated number of episodes """
-    def __init__(self, worker_num, environment, shared_model, counter, optimizer_lock, shared_optimizer,
-                 config, episodes_to_run, epsilon_decay_denominator, action_size, action_types, results_queue,
-                 local_model, gradient_updates_queue):
-        super(DreamerWorker, self).__init__()
-        self.environment = environment
-        self.config = config
-        self.worker_num = worker_num
-
-        self.gradient_clipping_norm = self.config.hyperparameters["gradient_clipping_norm"]
-        self.discount_rate = self.config.hyperparameters["discount_rate"]
-        self.normalise_rewards = self.config.hyperparameters["normalise_rewards"]
-
-        self.action_size = action_size
-        self.set_seeds(self.worker_num)
-        self.shared_model = shared_model
-        self.local_model = local_model
-        self.local_optimizer = Adam(self.local_model.parameters(), lr=0.0, eps=1e-4)
-        self.counter = counter
-        self.optimizer_lock = optimizer_lock
-        self.shared_optimizer = shared_optimizer
-        self.episodes_to_run = episodes_to_run
-        self.epsilon_decay_denominator = epsilon_decay_denominator
-        self.exploration_worker_difference = self.config.exploration_worker_difference
-        self.action_types = action_types
-        self.results_queue = results_queue
-        self.episode_number = 0
-
-        self.gradient_updates_queue = gradient_updates_queue
-
-    def set_seeds(self, worker_num):
-        """Sets random seeds for this worker"""
-        torch.manual_seed(self.config.seed + worker_num)
-        self.environment.seed(self.config.seed + worker_num)
-
-    def run(self):
-        """Starts the worker"""
-        torch.set_num_threads(1)
-        for ep_ix in range(self.episodes_to_run):
-            with self.optimizer_lock:
-                copy_model_over(self.shared_model, self.local_model)
-            epsilon_exploration = self.calculate_new_exploration()
-            state = self.reset_game_for_worker()
-            done = False
-            self.episode_states = []
-            self.episode_actions = []
-            self.episode_rewards = []
-            self.episode_log_action_probabilities = []
-            self.critic_outputs = []
-
-            while not done:
-                action, action_log_prob, critic_outputs = self.pick_action_and_get_critic_values(self.local_model, state, epsilon_exploration)
-                next_state, reward, done, _ =  self.environment.step(action)
-                self.episode_states.append(state)
-                self.episode_actions.append(action)
-                self.episode_rewards.append(reward)
-                self.episode_log_action_probabilities.append(action_log_prob)
-                self.critic_outputs.append(critic_outputs)
-                state = next_state
-
-            total_loss = self.calculate_total_loss()
-            self.put_gradients_in_queue(total_loss)
-            self.episode_number += 1
-            with self.counter.get_lock():
-                self.counter.value += 1
-                self.results_queue.put(np.sum(self.episode_rewards))
-
-    def calculate_new_exploration(self):
-        """Calculates the new exploration parameter epsilon. It picks a random point within 3X above and below the
-        current epsilon"""
-        with self.counter.get_lock():
-            epsilon = 1.0 / (1.0 + (self.counter.value / self.epsilon_decay_denominator))
-        epsilon = max(0.0, random.uniform(epsilon / self.exploration_worker_difference, epsilon * self.exploration_worker_difference))
-        return epsilon
-
-    def reset_game_for_worker(self):
-        """Resets the game environment so it is ready to play a new episode"""
-        state = self.environment.reset()
-        if self.action_types == "CONTINUOUS": self.noise.reset()
-        return state
-
-    def pick_action_and_get_critic_values(self, policy, state, epsilon_exploration=None):
-        """Picks an action using the policy"""
-        state = torch.from_numpy(state).float().unsqueeze(0)
-        model_output = policy.forward(state)
-        actor_output = model_output[:, list(range(self.action_size))] #we only use first set of columns to decide action, last column is state-value
-        critic_output = model_output[:, -1]
-        action_distribution = create_actor_distribution(self.action_types, actor_output, self.action_size)
-        action = action_distribution.sample().cpu().numpy()
-        if self.action_types == "CONTINUOUS": action += self.noise.sample()
-        if self.action_types == "DISCRETE":
-            if random.random() <= epsilon_exploration:
-                action = random.randint(0, self.action_size - 1)
-            else:
-                action = action[0]
-        action_log_prob = self.calculate_log_action_probability(action, action_distribution)
-        return action, action_log_prob, critic_output
-
-    def calculate_log_action_probability(self, actions, action_distribution):
-        """Calculates the log probability of the chosen action"""
-        policy_distribution_log_prob = action_distribution.log_prob(torch.Tensor([actions]))
-        return policy_distribution_log_prob
-
-    def calculate_total_loss(self, 
-                                obs, 
-                                action, 
-                                reward, 
-                                model,
-                                imagine_horizon,
-                                discount=0.99,
-                                lambda=0.95,
-                                kl_coeff=1.0,
-                                free_nats=3.0,
-                                log=False):
+    def action_sampler_fn(self, obs, state, explore, timestep):
+        """Action sampler function has two phases. During the prefill phase,
+        actions are sampled uniformly [-1, 1]. During training phase, actions
+        are evaluated through DreamerPolicy and an additive gaussian is added
+        to incentivize exploration.
         """
-        Constructs loss for the Dreamer model.
-        Args:
-            obs (TensorType): Observations (o_t)
-            action (TensorType): Actions (a_(t-1))
-            reward (TensorType): Rewards (r_(t-1))
-            model (nn.Module): DreamerModel having all the other model components encompassing all other models
-            imagine_horizon (int): Imagine horizon for actor and critic loss
-            discount (float): Discount
-            lambda_ (float): Lambda, like in GAE
-            kl_coeff (float): KL Coefficient for Divergence loss in model loss
-            free_nats (float): Threshold for minimum divergence in model loss
-            log (bool): If log, generate gifs
-        """
-        discounted_returns = self.calculate_discounted_returns()
-        if self.normalise_rewards:
-            discounted_returns = self.normalise_discounted_returns(discounted_returns)
-        critic_loss, advantages = self.calculate_critic_loss_and_advantages(discounted_returns)
-        actor_loss = self.calculate_actor_loss(advantages)
-        total_loss = actor_loss + critic_loss
-        return total_loss
 
-    def calculate_discounted_returns(self):
-        """Calculates the cumulative discounted return for an episode which we will then use in a learning iteration"""
-        discounted_returns = [0]
-        for ix in range(len(self.episode_states)):
-            return_value = self.episode_rewards[-(ix + 1)] + self.discount_rate*discounted_returns[-1]
-            discounted_returns.append(return_value)
-        discounted_returns = discounted_returns[1:]
-        discounted_returns = discounted_returns[::-1]
-        return discounted_returns
+        # Custom Exploration
+        if timestep <= int(self.config["prefill_timesteps"] / self.config["action_repeat"]):
+            logp = [0.0]
+            # Random action in space [-1.0, 1.0]
+            action = 2.0 * torch.rand(1, self.model.action_space.shape[0]) - 1.0
+            state = self.model.get_initial_state()
+        else:
+            # Weird RLLib Handling, this happens when env rests
+            if len(state[0].size()) == 3:
+                # Very hacky, but works on all envs
+                state = self.model.get_initial_state()
+            action, logp, state = self.model.policy(obs, state, explore)
+            action = Normal(action, self.config["explore_noise"]).sample()
+            action = torch.clamp(action, min=-1.0, max=1.0)
 
-    def normalise_discounted_returns(self, discounted_returns):
-        """Normalises the discounted returns by dividing by mean and std of returns that episode"""
-        mean = np.mean(discounted_returns)
-        std = np.std(discounted_returns)
-        discounted_returns -= mean
-        discounted_returns /= (std + 1e-5)
-        return discounted_returns
+        self.global_timestep += self.config["action_repeat"]
 
-    def calculate_critic_loss_and_advantages(self, all_discounted_returns):
-        """Calculates the critic's loss and the advantages"""
-        critic_values = torch.cat(self.critic_outputs)
-        advantages = torch.Tensor(all_discounted_returns) - critic_values
-        advantages = advantages.detach()
-        critic_loss =  (torch.Tensor(all_discounted_returns) - critic_values)**2
-        critic_loss = critic_loss.mean()
-        return critic_loss, advantages
+        return action, logp, state
+    
+    def _prefill_train_batch(self, ):
+        self.timesteps = 0
+        dict_keys = ['count', 'obs', 'action', 'reward', 'done']
+        obs = self.env.reset()
+        episode_obs = [obs]
+        episode_action = [0]
+        episode_reward = [0]
+        episode_done = [False]
+        episode_count = 1
+        episode_dict = {}
+        
+        def initialize(obs):
+            episode_obs = [obs]
+            episode_action = [0]
+            episode_reward = [0]
+            episode_done = [False]
+            episode_count = 1
+            episode_dict = {}
+        
+        while self.timesteps <= int(self.config["prefill_timesteps"] / self.config["action_repeat"]):    
+            action, logp, state = self.action_sampler_fn(obs, None, False, self.timesteps)
+            obs, reward, done, _ = self.env.step(action)
+            episode_count += 1
+            episode_obs.append(obs)
+            episode_action.append(action)
+            episode_done.append(done)
+            episode_reward.append(reward)
+            if done:
+                episode_dict.update({'count': episode_count,
+                                'obs': np.stack(episode_obs),
+                                'action': np.stack(episode_action),
+                                'reward': np.stack(episode_reward),
+                                'done': np.stack(episode_done)})
+                obs = self.env.reset()
+                initialize(obs)
+                self.episodes.append(episode_dict)
+            self.timesteps += 1
 
-    def calculate_actor_loss(self, advantages):
-        """Calculates the loss for the actor"""
-        action_log_probabilities_for_all_episodes = torch.cat(self.episode_log_action_probabilities)
-        actor_loss = -1.0 * action_log_probabilities_for_all_episodes * advantages
-        actor_loss = actor_loss.mean()
-        return actor_loss
+    def _add(self, batch):
+        for b in batch:
+            self.timesteps += b["count"]
+        self.episodes.extend(batch)
+        if len(self.episodes) > self.max_length:
+            remove_episode_index = len(self.episodes) - self.max_length
+            self.episodes = self.episodes[remove_episode_index:]
+    
+    def _sample(self, batch_size):
+        episodes_buffer = [] #{"count": 0, "obs": [], "reward": [], "action": [], "done": []}
+        while len(episodes_buffer) < batch_size:
+            rand_index = random.randint(0, len(self.episodes) - 1)
+            episode = self.episodes[rand_index]
+            if episode["count"] < self.length:
+                continue
+            available = episode["count"] - self.length
+            index = int(random.randint(0, available))
+            episodes_buffer.append({"obs": episode["obs"][index : index + self.length], 
+                                    "action": episode["action"][index: index + self.length],
+                                    "reward": episode["reward"][index: index + self.length],
+                                    "done": episode["done"][index: index + self.length]})
+        total_batch = {}
+        for k in episodes_buffer[0].keys():
+            total_batch[k] = np.stack([e[k] for e in episodes_buffer], axis=0)
+        return total_batch
+    
+    def postprocess_gif(self, gif: np.ndarray):
+        gif = np.clip(255 * gif, 0, 255).astype(np.uint8)
+        B, T, C, H, W = gif.shape
+        frames = gif.transpose((1, 2, 3, 0, 4)).reshape((1, T, C, H, B * W))
+        return frames
+    
+    def configure_optimizers(self,):
+        encoder_weights = list(self.model.encoder.parameters())
+        decoder_weights = list(self.model.decoder.parameters())
+        reward_weights = list(self.model.reward.parameters())
+        dynamics_weights = list(self.model.dynamics.parameters())
+        actor_weights = list(self.model.actor.parameters())
+        critic_weights = list(self.model.value.parameters())
+        model_opt = Adam(
+            encoder_weights + decoder_weights + reward_weights + dynamics_weights,
+            lr=self.config["td_model_lr"])
+        actor_opt = Adam(actor_weights, lr=self.config["actor_lr"])
+        critic_opt = Adam(critic_weights, lr=self.config["critic_lr"])
+        return [model_opt, actor_opt, critic_opt]
+    
+    def _batch(self, batch_size):
+        for _ in range(self.config["collect_interval"]):
+            total_batch = self._sample(batch_size)
+            for i in range(batch_size):
+                yield total_batch["obs"][i],  total_batch["action"][i], total_batch["reward"][i], total_batch["done"][i]
+    
+    def training_step(self, batch):
+        obs, action, reward, _ = batch
+        self.state = self.model.get_initial_state()
+        action, _, self.state = self._action_sampler(obs, self.state, self.explore, self.timesteps)
+        loss = self.dreamer_loss({"obs":obs, "action":action, "reward":reward})
+        return sum(list(loss))
+    
+    def validation_step(self, batch):
+        obs, action, reward, _ = batch
+        self.state = self.model.get_initial_state()
+        action, _, self.state = self._action_sampler(obs, self.state, self.explore, self.timesteps)
+        loss = self.dreamer_loss({"obs":obs, "action":action, "reward":reward})
+        return sum(list(loss))
 
-    def put_gradients_in_queue(self, total_loss):
-        """Puts gradients in a queue for the optimisation process to use to update the shared model"""
-        self.local_optimizer.zero_grad()
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.local_model.parameters(), self.gradient_clipping_norm)
-        gradients = [param.grad.clone() for param in self.local_model.parameters()]
-        self.gradient_updates_queue.put(gradients)
+    def _dataloader(self) -> DataLoader:
+        """Initialize the Replay Buffer dataset used for retrieving experiences"""
+        dataset = ExperienceSourceDataset(self.train_batch)
+        dataloader = DataLoader(dataset=dataset, batch_size=self.batch_size)
+        return dataloader
+
+    def train_dataloader(self) -> DataLoader:
+        """Get train loader"""
+        return self._dataloader()
+    
+    def val_dataloader(self) -> DataLoader:
+        """ Get val loader"""
+        return self._dataloader()
