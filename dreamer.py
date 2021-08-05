@@ -336,10 +336,6 @@ class Dreamer(pl.LightningModule):
         """Get train loader"""
         return self._dataloader()
     
-    def val_dataloader(self) -> DataLoader:
-        """ Get val loader"""
-        return self._dataloader()
-    
     def configure_optimizers(self,):
         encoder_weights = list(self.model.encoder.parameters())
         decoder_weights = list(self.model.decoder.parameters())
