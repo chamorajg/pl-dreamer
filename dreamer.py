@@ -40,16 +40,19 @@ class Dreamer(pl.LightningModule):
     def __init__(self, 
                     config):
         super().__init__()
-        self.save_hyperparameters()
-        self.agent = PLANet(config['obs_space'], config['action_space'], 
-                            config['num_outputs'], config['model_config'],
-                            config['name'])
+        self.save_hyperparameters(
+        )
+        self.config = config
+        self.model = PLANet(self.config['obs_space'], self.config['action_space'], 
+                            self.config['num_outputs'], self.config["dreamer"]["dreamer_model"],
+                            self.config['name'])
         self.model = self.agent
         self.episodes = []
-        self.max_length = config['max_length']
-        self.length = config['length']
-        self.timesteps = config['timesteps']
+        self.max_length = self.config["dreamer"]['max_length']
+        self.length = self.config["dreamer"]['length']
+        self.timesteps = 0
         self.fill_batches = []
+        self.batch_size = self.config["dreamer"]["batch_size"]
         prefill_episodes = self._prefill_train_batch()
         self._add(prefill_episodes)
 
@@ -84,9 +87,7 @@ class Dreamer(pl.LightningModule):
         model_weights = list(encoder_weights + decoder_weights + reward_weights +
                             dynamics_weights)
 
-        device = (torch.device("cuda")
-                if torch.cuda.is_available() else torch.device("cpu"))
-
+        device = self.device
         # PlaNET Model Loss
         latent = self.model.encoder(obs)
         post, prior = self.model.dynamics.observe(latent, action)
@@ -161,11 +162,11 @@ class Dreamer(pl.LightningModule):
             train_batch["actions"],
             train_batch["rewards"],
             self.model,
-            self.config["imagine_horizon"],
-            self.config["discount"],
-            self.config["lambda"],
-            self.config["kl_coeff"],
-            self.config["free_nats"],
+            self.config["dreamer"]["imagine_horizon"],
+            self.config["dreamer"]["discount"],
+            self.config["dreamer"]["lambda"],
+            self.config["dreamer"]["kl_coeff"],
+            self.config["dreamer"]["free_nats"],
             log_gif,
         )
 
@@ -194,7 +195,7 @@ class Dreamer(pl.LightningModule):
             episode_count = 1
             episode_dict = {}
         
-        while self.timesteps <= int(self.config["prefill_timesteps"] / self.config["action_repeat"]):    
+        while self.timesteps <= int(self.config["dreamer"]["prefill_timesteps"] / self.config["drainer"]["env_config"]["action_repeat"]):    
             action, logp, state = self.action_sampler_fn(obs, None, False, self.timesteps)
             obs, reward, done, _ = self.env.step(action)
             episode_count += 1
@@ -215,8 +216,8 @@ class Dreamer(pl.LightningModule):
         return episodes
     
     def _data_collect(self):
-        obs = self.env.reset()
-        state = self.model.get_initial_state()
+        self.data_obs = self.env.reset()
+        self.data_state = self.model.get_initial_state()
         episode_obs = [obs]
         episode_action = [0]
         episode_reward = [0]
@@ -233,7 +234,7 @@ class Dreamer(pl.LightningModule):
             episode_count = 1
             episode_dict = {}
         
-        for i in tqdm(range(self.config["max_episode_length"] / self.config["action_repeat"])):    
+        for i in tqdm(range(self.config["dreamer"]["max_episode_length"] / self.config["dreamer"]["env_config"]["action_repeat"])):
             action, logp, state = self.action_sampler_fn(obs, state, self.config["explore"], self.timesteps)
             obs, reward, done, _ = self.env.step(action)
             episode_count += 1
@@ -271,18 +272,28 @@ class Dreamer(pl.LightningModule):
             available = episode["count"] - self.length
             index = int(random.randint(0, available))
             episodes_buffer.append({"count": self.length,
-                                    "obs": episode["obs"][index : index + self.length], 
-                                    "action": episode["action"][index: index + self.length],
-                                    "reward": episode["reward"][index: index + self.length],
-                                    "done": episode["done"][index: index + self.length]})
+                                    "obs": torch.from_numpy(episode["obs"][index : index + self.length]), 
+                                    "action": torch.from_numpy(episode["action"][index: index + self.length]),
+                                    "reward": torch.from_numpy(episode["reward"][index: index + self.length]),
+                                    "done": torch.from_numpy(episode["done"][index: index + self.length]),
+                                    })
         # return episodes_buffer
         total_batch = {}
         for k in episodes_buffer[0].keys():
             total_batch[k] = np.stack([e[k] for e in episodes_buffer], axis=0)
         return total_batch
     
-    def _batch(self, batch_size):
+    def _train_batch(self, batch_size):
         for _ in range(self.config["collect_interval"]):
+            total_batch = self._sample(batch_size)
+            def return_batch(i):
+                return total_batch["count"][i], total_batch["obs"][i], \
+                    total_batch["action"][i], total_batch["reward"][i], total_batch["done"][i]
+            for i in range(batch_size):
+                yield return_batch(i)
+    
+    def _data_batch(self, batch_size):
+        for _ in range(self.config["dreamer"]["collect_interval"]):
             total_batch = self._sample(batch_size)
             def return_batch(i):
                 return total_batch["count"][i], total_batch["obs"][i], \
@@ -298,7 +309,7 @@ class Dreamer(pl.LightningModule):
         """
 
         # Custom Exploration
-        if timestep <= int(self.config["prefill_timesteps"] / self.config["action_repeat"]):
+        if timestep <= int(self.config["dreamer"]["prefill_timesteps"] / self.config["dreamer"]["env_config"]["action_repeat"]):
             logp = [0.0]
             # Random action in space [-1.0, 1.0]
             action = 2.0 * torch.rand(1, self.model.action_space.shape[0]) - 1.0
@@ -309,17 +320,15 @@ class Dreamer(pl.LightningModule):
                 # Very hacky, but works on all envs
                 state = self.model.get_initial_state()
             action, logp, state = self.model.policy(obs, state, explore)
-            action = Normal(action, self.config["explore_noise"]).sample()
+            action = Normal(action, self.config["dreamer"]["explore_noise"]).sample()
             action = torch.clamp(action, min=-1.0, max=1.0)
-
-        self.timesteps += 1
 
         return action, logp, state
     
     def training_step(self, batch):
-        obs, action, reward, _ = batch
-        self.state = self.model.get_initial_state()
-        action, _, self.state = self.action_sampler_fn(obs, self.state, self.explore, self.timesteps)
+        count, obs, action, reward, _ = batch
+        state = self.model.get_initial_state()
+        action, _, state = self.action_sampler_fn(obs, state, self.explore, self.timesteps)
         loss = self.dreamer_loss({"obs":obs, "action":action, "reward":reward})
         return sum(list(loss))
     
@@ -328,19 +337,32 @@ class Dreamer(pl.LightningModule):
             data_collection_episodes = self._data_collect()
             self._add(data_collection_episodes)
 
-        if self.current_epoch % self.config["test_interval"] == 0:
+        if self.current_epoch % self.config["trainer_params"]["val_check_interval"] == 0:
             self.model.eval()
             test_data = self._data_collect()
-
-    def _dataloader(self) -> DataLoader:
-        """Initialize the Replay Buffer dataset used for retrieving experiences"""
-        dataset = ExperienceSourceDataset(self.train_batch)
-        dataloader = DataLoader(dataset=dataset, batch_size=self.batch_size)
-        return dataloader
+        
+    def validation_step(self, batch):
+        return batch
+    
+    def _collate_fn(self, batch):
+        return_batch = {}
+        for k in batch[0].keys():
+            if k == 'count':
+                return_batch[k] = torch.LongTensor([data[k] for data in batch])
+            return_batch[k] = torch.stack([data[k] for data in batch])
+        return return_batch
 
     def train_dataloader(self) -> DataLoader:
         """Get train loader"""
-        return self._dataloader()
+        dataset = ExperienceSourceDataset(self._batch(self.batch_size))
+        dataloader = DataLoader(dataset=dataset(), batch_size=self.batch_size, collate_fn=self.collate_fn)
+        return dataloader
+    
+    def val_dataloader(self) -> DataLoader:
+        """Get val loader"""
+        dataset = ExperienceSourceDataset(self._batch(1))
+        dataloader = DataLoader(dataset=self._dataset(), batch_size=1)
+        return dataloader 
     
     def configure_optimizers(self,):
         encoder_weights = list(self.model.encoder.parameters())
@@ -351,9 +373,9 @@ class Dreamer(pl.LightningModule):
         critic_weights = list(self.model.value.parameters())
         model_opt = Adam(
             encoder_weights + decoder_weights + reward_weights + dynamics_weights,
-            lr=self.config["td_model_lr"])
-        actor_opt = Adam(actor_weights, lr=self.config["actor_lr"])
-        critic_opt = Adam(critic_weights, lr=self.config["critic_lr"])
+            lr=self.config["dreamer"]["td_model_lr"])
+        actor_opt = Adam(actor_weights, lr=self.config["dreamer"]["actor_lr"])
+        critic_opt = Adam(critic_weights, lr=self.config["dreamer"]["critic_lr"])
         return [model_opt, actor_opt, critic_opt]
     
     def _postprocess_gif(self, gif: np.ndarray):
