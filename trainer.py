@@ -10,7 +10,6 @@ def main():
             config = yaml.safe_load(stream)
         except yaml.YAMLError as exc:
             print(exc)
-    monitor=None, verbose=False, save_last=None, save_top_k=1, save_weights_only=False, mode='min'
     ckpt_callback = ModelCheckpoint(
                             save_top_k=config["ckpt_callback"]["save_top_k"],
                             monitor=config["ckpt_callback"]["monitor"],
