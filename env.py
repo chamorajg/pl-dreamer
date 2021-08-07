@@ -3,7 +3,7 @@ import random
 import numpy as np
 from typing import Any, List, Tuple, Optional
 
-class DeepMind:
+class DMControlSuiteEnv:
 
     def __init__(self, 
                 name: str, 
@@ -45,15 +45,24 @@ class DeepMind:
         reward = time_step.reward or 0
         done = time_step.last()
         info = {'discount': np.array(time_step.discount, np.float32)}
-        return obs, reward, done, info
+        return obs["image"], reward, done, info
 
     def reset(self):
         time_step = self._env.reset()
         obs = dict(time_step.observation)
         obs['image'] = self.render()
-        return obs
+        return obs["image"]
 
     def render(self, *args, **kwargs):
         if kwargs.get('mode', 'rgb_array') != 'rgb_array':
             raise ValueError("Only render mode 'rgb_array' is supported.")
         return self._env.physics.render(*self._size, camera_id=self._camera)
+
+if __name__ == '__main__':
+    import cv2
+    env = DMControlSuiteEnv("hopper_hop")
+    obs = env.reset()
+    action_space = env.action_space
+    print(action_space)
+    # cv2.imshow("Obs", cv2.resize(obs, (640, 640)))
+    # cv2.waitKey(0)

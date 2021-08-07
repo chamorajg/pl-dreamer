@@ -77,7 +77,9 @@ class Encoder(nn.Module):
         orig_shape = x.shape
         x = x.reshape(-1, *x.shape[-3:])
         x = self.encoder(x)
+        print(x.shape)
         x = x.reshape(*orig_shape[:-3], -1)
+        print(x.shape)
         return x
 
 
@@ -97,7 +99,7 @@ class Decoder(nn.Module):
         self.shape = shape
         self.decoder = nn.Sequential(
             nn.Linear(input_size, 32 * self.depth),
-            nn.Reshape([-1, 32 * self.depth, 1, 1]),
+            Reshape([-1, 32 * self.depth, 1, 1]),
             nn.ConvTranspose2d(32 * self.depth, 4 * self.depth, 5, stride=2),
             nn.ReLU(),
             nn.ConvTranspose2d(4 * self.depth, 2 * self.depth, 5, stride=2),
@@ -247,7 +249,6 @@ class RSSM(nn.Module):
         self.deter_size = deter
         self.hidden_size = hidden
         self.act = nn.ELU
-
         self.obs1 = nn.Linear(embed_size + deter, hidden)
         self.obs2 = nn.Linear(hidden, 2 * stoch)
 
@@ -257,11 +258,10 @@ class RSSM(nn.Module):
         self.img3 = nn.Linear(hidden, 2 * stoch)
 
         self.softplus = nn.Softplus
+        
+        
 
-        self.device = (torch.device("cuda")
-                       if torch.cuda.is_available() else torch.device("cpu"))
-
-    def get_initial_state(self, batch_size: int) -> List[TensorType]:
+    def get_initial_state(self, batch_size: int, device) -> List[TensorType]:
         """Returns the inital state for the RSSM, which consists of mean,
         std for the stochastic state, the sampled stochastic hidden state
         (from mean, std), and the deterministic hidden state, which is
@@ -272,10 +272,10 @@ class RSSM(nn.Module):
             List of tensors
         """
         return [
-            torch.zeros(batch_size, self.stoch_size).to(self.device),
-            torch.zeros(batch_size, self.stoch_size).to(self.device),
-            torch.zeros(batch_size, self.stoch_size).to(self.device),
-            torch.zeros(batch_size, self.deter_size).to(self.device),
+            torch.zeros(batch_size, self.stoch_size).to(device),
+            torch.zeros(batch_size, self.stoch_size).to(device),
+            torch.zeros(batch_size, self.stoch_size).to(device),
+            torch.zeros(batch_size, self.deter_size).to(device),
         ]
 
     def observe(self,
@@ -355,6 +355,7 @@ class RSSM(nn.Module):
             Post and Prior state
       """
         prior = self.img_step(prev_state, prev_action)
+        print(prior[3].shape, embed.shape)
         x = torch.cat([prior[3], embed], dim=-1)
         x = self.obs1(x)
         x = self.act()(x)
@@ -395,12 +396,11 @@ class RSSM(nn.Module):
         return td.Normal(mean, std)
 
 
-# Represents all models in Dreamer, unifies them all into a single interface
+# Dreamer Model
 class PLANet(nn.Module):
     def __init__(self, obs_space, action_space, num_outputs, model_config,
                  name):
-        super().__init__(obs_space, action_space, num_outputs, model_config,
-                         name)
+        super().__init__()
 
         nn.Module.__init__(self)
         self.depth = model_config["depth_size"]
@@ -425,9 +425,6 @@ class PLANet(nn.Module):
         self.value = DenseDecoder(self.stoch_size + self.deter_size, 1, 3,
                                   self.hidden_size)
         self.state = None
-
-        self.device = (torch.device("cuda")
-                       if torch.cuda.is_available() else torch.device("cpu"))
 
     def policy(self, obs: TensorType, state: List[TensorType], explore=True
                ) -> Tuple[TensorType, List[float], List[TensorType]]:
@@ -481,9 +478,9 @@ class PLANet(nn.Module):
         imag_feat = self.dynamics.get_feature(outputs)
         return imag_feat
 
-    def initial_state(self) -> List[TensorType]:
-        self.state = self.dynamics.get_initial_state(1) + [
-            torch.zeros(1, self.action_space.shape[0]).to(self.device)
+    def initial_state(self, device) -> List[TensorType]:
+        self.state = self.dynamics.get_initial_state(1, device) + [
+            torch.zeros(1, self.action_size).to(device)
         ]
         return self.state
 

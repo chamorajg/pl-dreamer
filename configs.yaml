@@ -1,17 +1,20 @@
+name: Dreamer
 ckpt_callback:
   save_top_k: 1
   mode: min
   monitor: val_loss
-trainer:
+trainer_params:
   default_root_dir: /kaggle/pl-dreamer
-  gpus: 0
+  gpus: 1
   gradient_clip_val: 100.0
   val_check_interval: 5
   max_epochs: 1000
 dreamer:
-  td_model_lr: 6e-4
-  actor_lr: 8e-5
-  critic_lr: 8e-5
+  td_model_lr: 6.0e-4
+  actor_lr: 8.0e-5
+  critic_lr: 8.0e-5
+  default_lr: 1.0e-5
+  weight_decay: 1.0e-3
   discount: 0.99
   lambda: 0.95
   clip_actions: False
@@ -23,9 +26,15 @@ dreamer:
   kl_coeff: 1.0
   prefill_timesteps: 5000
   explore_noise: 0.3
+  max_length: 1000
+  collect_interval: 1000
+  length: 50
   dreamer_model:
+      obs_space: [3, 64, 64]
+      action_space: [0, 1, 2, 3]
+      num_outputs: 64
       custom_model: DreamerModel
-      deter_size: 200,
+      deter_size: 200
       stoch_size: 30
       depth_size: 32
       hidden_size: 400

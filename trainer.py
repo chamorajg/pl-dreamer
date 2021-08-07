@@ -1,6 +1,6 @@
 import yaml
 import pytorch_lightning as pl
-from dreamer import Dreamer
+from dreamer import DreamerTrainer
 from pytorch_lightning.callbacks import ModelCheckpoint
 
 
@@ -15,7 +15,7 @@ def main():
                             monitor=config["ckpt_callback"]["monitor"],
                             mode=config["ckpt_callback"]["mode"],
                             )
-    model = Dreamer(config)
+    model = DreamerTrainer(config)
     trainer = pl.Trainer(
                         default_root_dir=config["trainer_params"]["default_root_dir"],
                         gpus=config["trainer_params"]["gpus"],
