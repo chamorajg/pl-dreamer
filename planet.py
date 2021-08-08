@@ -8,27 +8,31 @@ import numpy as np
 from typing import Any, List, Tuple, Optional
 TensorType = Any
 
+def atanh(x):
+    return 0.5 * torch.log((1 + x) / (1 - x))
+
 class TanhBijector(torch.distributions.Transform):
     def __init__(self):
         super().__init__()
+        self.bijective = True
+        self.domain = torch.distributions.constraints.real #Constraint(False)
+        self.codomain = torch.distributions.constraints.real #Constraint(False)
 
-    def atanh(self, x):
-        return 0.5 * torch.log((1 + x) / (1 - x))
+    @property
+    def sign(self): return 1.
 
-    def sign(self):
-        return 1.
+    def _call(self, x): return torch.tanh(x)
 
-    def _call(self, x):
-        return torch.tanh(x)
-
-    def _inverse(self, y):
-        y = torch.where((torch.abs(y) <= 1.),
-                        torch.clamp(y, -0.99999997, 0.99999997), y)
-        y = self.atanh(y)
+    def _inverse(self, y: torch.Tensor):
+        y = torch.where(
+            (torch.abs(y) <= 1.),
+            torch.clamp(y, -0.99999997, 0.99999997),
+            y)
+        y = atanh(y)
         return y
 
     def log_abs_det_jacobian(self, x, y):
-        return 2. * (np.log(2) - x - nn.functional.softplus(-2. * x))
+        return 2. * (np.log(2) - x - F.softplus(-2. * x))
 
 class Reshape(nn.Module):
 
@@ -77,9 +81,7 @@ class Encoder(nn.Module):
         orig_shape = x.shape
         x = x.reshape(-1, *x.shape[-3:])
         x = self.encoder(x)
-        print(x.shape)
         x = x.reshape(*orig_shape[:-3], -1)
-        print(x.shape)
         return x
 
 
@@ -104,19 +106,17 @@ class Decoder(nn.Module):
             nn.ReLU(),
             nn.ConvTranspose2d(4 * self.depth, 2 * self.depth, 5, stride=2),
             nn.ReLU(),
-            nn.ConvTranspose2d(2 * self.depth, self.depth, 5, stride=2),
+            nn.ConvTranspose2d(2 * self.depth, self.depth, 6, stride=2),
             nn.ReLU(),
             nn.ConvTranspose2d(self.depth, self.shape[0], 6, stride=2),
         )
     
     def forward(self, x):
         orig_shape = x.shape
-        x = self.model(x)
+        x = self.decoder(x)
         reshape_size = orig_shape[:-1] + self.shape
         mean = x.view(*reshape_size)
-        return td.Independent(  
-                        td.normal(mean, 1), 
-                        len(self.shape))
+        return td.Independent(  td.Normal(mean, 1), len(self.shape))
 
 
 class ActionDecoder(nn.Module):
@@ -353,9 +353,8 @@ class RSSM(nn.Module):
             embed (TensorType): Embedding from ConvEncoder
         Returns:
             Post and Prior state
-      """
+        """
         prior = self.img_step(prev_state, prev_action)
-        print(prior[3].shape, embed.shape)
         x = torch.cat([prior[3], embed], dim=-1)
         x = self.obs1(x)
         x = self.act()(x)
@@ -439,9 +438,8 @@ class PLANet(nn.Module):
         action = self.state[4]
 
         embed = self.encoder(obs)
-        post, _ = self.dynamics.obs_step(post, action, embed)
+        post, _ = self.dynamics.observe(embed, action, post)
         feat = self.dynamics.get_feature(post)
-
         action_dist = self.actor(feat)
         if explore:
             action = action_dist.sample()
@@ -478,7 +476,7 @@ class PLANet(nn.Module):
         imag_feat = self.dynamics.get_feature(outputs)
         return imag_feat
 
-    def initial_state(self, device) -> List[TensorType]:
+    def get_initial_state(self, device) -> List[TensorType]:
         self.state = self.dynamics.get_initial_state(1, device) + [
             torch.zeros(1, self.action_size).to(device)
         ]
