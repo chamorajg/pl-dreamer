@@ -2,7 +2,8 @@ name: Dreamer
 ckpt_callback:
   save_top_k: 1
   mode: min
-  monitor: val_loss
+  monitor: loss
+  save_on_train_epoch_end: True
 trainer_params:
   default_root_dir: /kaggle/pl-dreamer
   gpus: 1
@@ -14,7 +15,7 @@ dreamer:
   actor_lr: 8.0e-5
   critic_lr: 8.0e-5
   default_lr: 1.0e-5
-  weight_decay: 1.0e-3
+  weight_decay: 1.0e-4
   discount: 0.99
   lambda: 0.95
   clip_actions: False
@@ -27,7 +28,7 @@ dreamer:
   prefill_timesteps: 5000
   explore_noise: 0.3
   max_episode_length: 1000
-  collect_interval: 1000
+  collect_interval: 100
   length: 50
   dreamer_model:
       obs_space: [3, 64, 64]

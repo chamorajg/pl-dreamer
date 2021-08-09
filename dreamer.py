@@ -183,7 +183,6 @@ class DreamerTrainer(pl.LightningModule):
     
     def _prefill_train_batch(self, ):
         self.timesteps = 0
-        dict_keys = ['count', 'obs', 'action', 'reward', 'done']
         obs = self.env.reset()
         episode_obs = [torch.FloatTensor(np.ascontiguousarray(obs.transpose((2, 0, 1))))]
         episode_action = [torch.FloatTensor([[0, 0, 0, 0]])]
@@ -238,14 +237,14 @@ class DreamerTrainer(pl.LightningModule):
         
     
     def _data_collect(self):
-        self.data_obs = self.env.reset()
-        self.data_state = self.model.get_initial_state(self.device)
-        episode_obs = [torch.FloatTensor(np.ascontiguousarray(self.data_obs.transpose((2, 0, 1))))]
+        obs = self.env.reset()
+        state = self.model.get_initial_state(self.device)
+        episode_obs = [torch.FloatTensor(np.ascontiguousarray(obs.transpose((2, 0, 1))))]
         episode_action = [torch.FloatTensor([[0, 0, 0, 0]])]
         episode_reward = [0]
         episode_done = [False]
         episode_count = 1
-        episode_state = [self.data_state]
+        episode_state = [state]
         episode_dict = {}
         episodes = []
         
@@ -257,17 +256,17 @@ class DreamerTrainer(pl.LightningModule):
             episode_done = [False]
             episode_count = 1
             episode_dict = {}
-        
-        for i in tqdm(range(self.config["dreamer"]["max_episode_length"] / self.config["dreamer"]["env_config"]["action_repeat"])):
-            action, logp, state = self.action_sampler_fn(obs, state, self.config["explore"], self.timesteps)
-            obs, reward, done, _ = self.env.step(action)
+        for i in range(self.config["dreamer"]["max_episode_length"] // self.config["dreamer"]["env_config"]["action_repeat"]):
+            action, logp, state = self.action_sampler_fn(episode_obs[-1].unsqueeze(0).to(self.device), episode_state[-1], 
+                                        self.config["dreamer"]["explore_noise"], self.timesteps)
+            obs, reward, done, _ = self.env.step(action.detach().cpu().numpy())
             obs = obs.transpose((2, 0, 1))
             obs_tensor = torch.FloatTensor(np.ascontiguousarray(obs))
             episode_count += 1
-            episode_obs.append(obs_tensor)
-            episode_action.append(action)
-            episode_done.append(torch.from_numpy(done))
-            episode_reward.append(torch.from_numpy(reward))
+            episode_obs.append(obs_tensor.to(self.device))
+            episode_action.append(action.detach().cpu())
+            episode_done.append(done)
+            episode_reward.append(reward)
             episode_state.append(state)
             self.timesteps += 1
             if done:
@@ -325,7 +324,7 @@ class DreamerTrainer(pl.LightningModule):
         for _ in range(self.config["dreamer"]["collect_interval"]):
             total_batch = self._sample(batch_size)
             def return_batch(i):
-                return total_batch["count"][i], total_batch["obs"][i], [total_batch["state"][b][i] for b in range(4)],\
+                return total_batch["count"][i], (total_batch["obs"][i] / 255.0 - 0.5), [total_batch["state"][b][i] for b in range(4)],\
                     total_batch["action"][i], total_batch["reward"][i], total_batch["done"][i]
             for i in range(batch_size):
                 yield return_batch(i)
@@ -376,9 +375,14 @@ class DreamerTrainer(pl.LightningModule):
             data_collection_episodes = self._data_collect()
             self._add(data_collection_episodes)
 
-        if self.current_epoch % self.config["trainer_params"]["val_check_interval"] == 0:
+        if self.current_epoch > 0 and self.current_epoch % self.config["trainer_params"]["val_check_interval"] == 0:
             self.model.eval()
             test_data = self._data_collect()
+            self.model.train()
+        total_loss = 0
+        for out in outputs:
+            total_loss += out['loss'].item()       
+        self.log('loss', total_loss)
         
     # def validation_step(self, batch, batch_idx):
     #     return batch
@@ -394,14 +398,14 @@ class DreamerTrainer(pl.LightningModule):
     def train_dataloader(self) -> DataLoader:
         """Get train loader"""
         dataset = ExperienceSourceDataset(self._train_batch(self.batch_size))
-        dataloader = DataLoader(dataset=dataset, batch_size=self.batch_size)
+        dataloader = DataLoader(dataset=dataset, batch_size=self.batch_size, pin_memory=True, num_workers=1)
         return dataloader
     
-    def val_dataloader(self) -> DataLoader:
-        """Get val loader"""
-        dataset = ExperienceSourceDataset(self._data_batch(1))
-        dataloader = DataLoader(dataset=dataset, batch_size=1)
-        return dataloader 
+    # def val_dataloader(self) -> DataLoader:
+    #     """Get val loader"""
+    #     dataset = ExperienceSourceDataset(self._data_batch(1))
+    #     dataloader = DataLoader(dataset=dataset, batch_size=1, pin_memory=True)
+    #     return dataloader 
     
     def configure_optimizers(self,):
         encoder_weights = list(self.model.encoder.parameters())
@@ -421,7 +425,7 @@ class DreamerTrainer(pl.LightningModule):
     
     def _postprocess_gif(self, gif: np.ndarray):
         gif = gif.detach().cpu().numpy()
-        gif = np.clip(255 * gif, 0, 255).astype(np.uint8)
+        gif = np.clip(255*gif, 0, 255).astype(np.uint8)
         B, T, C, H, W = gif.shape
         frames = gif.transpose((1, 2, 3, 0, 4)).reshape((1, T, C, H, B * W)).squeeze(0)
         def display_image(frame):
@@ -429,7 +433,7 @@ class DreamerTrainer(pl.LightningModule):
             return Image.fromarray(frame)
         img, *imgs = [display_image(frame) for frame in list(frames)]
         # with open('./')
-        img.save('./lightning_logs/movie.gif', format='GIF', append_images=imgs,
+        img.save(f'{self.trainer.log_dir}/movie_{self.current_epoch}.gif', format='GIF', append_images=imgs,
          save_all=True, loop=0)
         return frames
     
@@ -438,7 +442,7 @@ class DreamerTrainer(pl.LightningModule):
         recon = image_pred.mean[:6]
         istate = self.model.dynamics.get_initial_state(6, self.device)
         init, _ = self.model.dynamics.observe(embed[:6, :5], action[:6, :5], istate)
-        init = [itm[:, -1] for itm in init]
+        init = [itm[:6, -1] for itm in init]
         prior = self.model.dynamics.imagine(action[:6, 5:], init)
         openl = self.model.decoder(self.model.dynamics.get_feature(prior)).mean
 

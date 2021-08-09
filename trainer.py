@@ -11,9 +11,11 @@ def main():
         except yaml.YAMLError as exc:
             print(exc)
     ckpt_callback = ModelCheckpoint(
+                            filename='{epoch}-{loss:.2f}',
                             save_top_k=config["ckpt_callback"]["save_top_k"],
                             monitor=config["ckpt_callback"]["monitor"],
                             mode=config["ckpt_callback"]["mode"],
+                            save_on_train_epoch_end=config["ckpt_callback"]["save_on_train_epoch_end"],
                             )
     model = DreamerTrainer(config)
     trainer = pl.Trainer(

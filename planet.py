@@ -438,7 +438,11 @@ class PLANet(nn.Module):
         action = self.state[4]
 
         embed = self.encoder(obs)
-        post, _ = self.dynamics.observe(embed, action, post)
+        
+        if len(embed.size()) == 2:
+            post, _ = self.dynamics.obs_step(post, action, embed)
+        else:
+            post, _ = self.dynamics.observe(embed, action, post)
         feat = self.dynamics.get_feature(post)
         action_dist = self.actor(feat)
         if explore:
