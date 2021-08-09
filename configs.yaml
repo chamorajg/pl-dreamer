@@ -1,4 +1,5 @@
 name: Dreamer
+env: walker_walk
 ckpt_callback:
   save_top_k: 1
   mode: min
@@ -30,9 +31,10 @@ dreamer:
   max_episode_length: 1000
   collect_interval: 100
   length: 50
+  max_experience_length: 1000
   dreamer_model:
       obs_space: [3, 64, 64]
-      action_space: [0, 1, 2, 3]
+      action_space: [0, 0, 0, 0, 0, 0]
       num_outputs: 64
       custom_model: DreamerModel
       deter_size: 200

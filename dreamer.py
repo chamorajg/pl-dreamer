@@ -44,7 +44,7 @@ class DreamerTrainer(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.config = config
-        self.env = DMControlSuiteEnv('hopper_hop')
+        self.env = DMControlSuiteEnv(self.config["env"])
         self.model = PLANet(self.config["dreamer"]["dreamer_model"]['obs_space'], 
                             np.array(self.config["dreamer"]["dreamer_model"]['action_space']), 
                             self.config["dreamer"]["dreamer_model"]['num_outputs'], 
@@ -52,12 +52,13 @@ class DreamerTrainer(pl.LightningModule):
                             self.config['name'])
         # self.model = self.agent
         self.episodes = []
-        self.max_length = self.config["dreamer"]['max_episode_length']
+        self.max_length = self.config["dreamer"]['max_experience_length']
         self.length = self.config["dreamer"]['length']
         self.timesteps = 0
         self.explore = self.config["dreamer"]['explore_noise']
         self.fill_batches = []
         self.batch_size = self.config["dreamer"]["batch_size"]
+        self.action_space = len(self.config["dreamer"]["dreamer_model"]["action_space"])
         prefill_episodes = self._prefill_train_batch()
         self._add(prefill_episodes)     
 
@@ -185,7 +186,7 @@ class DreamerTrainer(pl.LightningModule):
         self.timesteps = 0
         obs = self.env.reset()
         episode_obs = [torch.FloatTensor(np.ascontiguousarray(obs.transpose((2, 0, 1))))]
-        episode_action = [torch.FloatTensor([[0, 0, 0, 0]])]
+        episode_action = [torch.FloatTensor(torch.zeros(1, self.action_space))]
         episode_reward = [0]
         episode_done = [False]
         episode_count = 1
@@ -195,7 +196,7 @@ class DreamerTrainer(pl.LightningModule):
         
         def initialize(obs):
             episode_obs = [obs]
-            episode_action = [0]
+            episode_action = [torch.FloatTensor(torch.zeros(1, self.action_space))]
             episode_reward = [0]
             episode_state = [self.model.get_initial_state(self.device)]
             episode_done = [False]
@@ -240,7 +241,7 @@ class DreamerTrainer(pl.LightningModule):
         obs = self.env.reset()
         state = self.model.get_initial_state(self.device)
         episode_obs = [torch.FloatTensor(np.ascontiguousarray(obs.transpose((2, 0, 1))))]
-        episode_action = [torch.FloatTensor([[0, 0, 0, 0]])]
+        episode_action = [torch.FloatTensor(torch.zeros(1, self.action_space))]
         episode_reward = [0]
         episode_done = [False]
         episode_count = 1
@@ -250,14 +251,14 @@ class DreamerTrainer(pl.LightningModule):
         
         def initialize(obs):
             episode_obs = [obs]
-            episode_action = [0]
+            episode_action = [torch.FloatTensor(torch.zeros(1, self.action_space))]
             episode_reward = [0]
             episode_state = [self.model.get_initial_state(self.device)]
             episode_done = [False]
             episode_count = 1
             episode_dict = {}
         for i in range(self.config["dreamer"]["max_episode_length"] // self.config["dreamer"]["env_config"]["action_repeat"]):
-            action, logp, state = self.action_sampler_fn(episode_obs[-1].unsqueeze(0).to(self.device), episode_state[-1], 
+            action, logp, state = self.action_sampler_fn(((episode_obs[-1] / 255.0) - 0.5).unsqueeze(0).to(self.device), episode_state[-1], 
                                         self.config["dreamer"]["explore_noise"], self.timesteps)
             obs, reward, done, _ = self.env.step(action.detach().cpu().numpy())
             obs = obs.transpose((2, 0, 1))
