@@ -26,7 +26,7 @@ dreamer:
   kl_coeff: 1.0
   prefill_timesteps: 5000
   explore_noise: 0.3
-  max_length: 1000
+  max_episode_length: 1000
   collect_interval: 1000
   length: 50
   dreamer_model:

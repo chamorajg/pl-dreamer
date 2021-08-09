@@ -2,6 +2,7 @@ import copy
 import time
 import random
 import numpy as np
+from PIL import Image
 from tqdm import tqdm
 from typing import Callable, Iterator, Tuple
 
@@ -51,7 +52,7 @@ class DreamerTrainer(pl.LightningModule):
                             self.config['name'])
         # self.model = self.agent
         self.episodes = []
-        self.max_length = self.config["dreamer"]['max_length']
+        self.max_length = self.config["dreamer"]['max_episode_length']
         self.length = self.config["dreamer"]['length']
         self.timesteps = 0
         self.explore = self.config["dreamer"]['explore_noise']
@@ -139,6 +140,7 @@ class DreamerTrainer(pl.LightningModule):
         post_ent = torch.mean(post_dist.entropy())
 
         log_gif = None
+
         if log:
             log_gif = self._log_summary(obs, action, latent, image_pred)
 
@@ -154,7 +156,7 @@ class DreamerTrainer(pl.LightningModule):
         }
 
         if log_gif is not None:
-            return_dict["log_gif"] = log_gif
+            return_dict["log_gif"] = self._postprocess_gif(log_gif)
         return return_dict
 
     def dreamer_loss(self, train_batch):
@@ -366,7 +368,7 @@ class DreamerTrainer(pl.LightningModule):
         state = self.model.dynamics.get_initial_state(obs.shape[0], self.device)
         state = state + [action]
         action, _, state = self.action_sampler_fn(obs, state, self.explore, self.timesteps)
-        loss = self.dreamer_loss({"obs":obs, "actions":action, "rewards":reward})
+        loss = self.dreamer_loss({"obs":obs, "actions":action, "rewards":reward, "log_gif": True})
         return sum(list(loss))
     
     def training_epoch_end(self, outputs):
@@ -378,8 +380,8 @@ class DreamerTrainer(pl.LightningModule):
             self.model.eval()
             test_data = self._data_collect()
         
-    def validation_step(self, batch, batch_idx):
-        return batch
+    # def validation_step(self, batch, batch_idx):
+    #     return batch
     
     def _collate_fn(self, batch):
         return_batch = {}
@@ -418,15 +420,24 @@ class DreamerTrainer(pl.LightningModule):
         return model_opt
     
     def _postprocess_gif(self, gif: np.ndarray):
+        gif = gif.detach().cpu().numpy()
         gif = np.clip(255 * gif, 0, 255).astype(np.uint8)
         B, T, C, H, W = gif.shape
-        frames = gif.transpose((1, 2, 3, 0, 4)).reshape((1, T, C, H, B * W))
+        frames = gif.transpose((1, 2, 3, 0, 4)).reshape((1, T, C, H, B * W)).squeeze(0)
+        def display_image(frame):
+            frame = frame.transpose((1, 2, 0))
+            return Image.fromarray(frame)
+        img, *imgs = [display_image(frame) for frame in list(frames)]
+        # with open('./')
+        img.save('./lightning_logs/movie.gif', format='GIF', append_images=imgs,
+         save_all=True, loop=0)
         return frames
     
     def _log_summary(self, obs, action, embed, image_pred):
         truth = obs[:6] + 0.5
         recon = image_pred.mean[:6]
-        init, _ = self.model.dynamics.observe(embed[:6, :5], action[:6, :5])
+        istate = self.model.dynamics.get_initial_state(6, self.device)
+        init, _ = self.model.dynamics.observe(embed[:6, :5], action[:6, :5], istate)
         init = [itm[:, -1] for itm in init]
         prior = self.model.dynamics.imagine(action[:6, 5:], init)
         openl = self.model.decoder(self.model.dynamics.get_feature(prior)).mean
