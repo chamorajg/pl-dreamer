@@ -25,6 +25,7 @@ def main():
                         callbacks=[ckpt_callback],
                         val_check_interval=config["trainer_params"]["val_check_interval"],
                         max_epochs=config["trainer_params"]["max_epochs"],
+                        # resume_from_checkpoint='/kaggle/pl-dreamer/lightning_logs/version_1/checkpoints/epoch=138-loss=1129636.38.ckpt',
                         )
     trainer.fit(model)
 

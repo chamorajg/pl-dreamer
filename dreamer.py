@@ -203,8 +203,9 @@ class DreamerTrainer(pl.LightningModule):
             episode_count = 1
             episode_dict = {}
         
-        while self.timesteps <= int(self.config["dreamer"]["prefill_timesteps"] / self.config["dreamer"]["env_config"]["action_repeat"]):    
-            action, logp, state = self.action_sampler_fn(obs, None, False, self.timesteps)
+        while len(episodes) < self.config["dreamer"]["prefill_episodes"]: 
+            #self.timesteps <= int(self.config["dreamer"]["prefill_timesteps"] / self.config["dreamer"]["env_config"]["action_repeat"]):    
+            action, logp, state = self.prefill_action_sampler_fn(obs, None, False, self.timesteps)
             obs, reward, done, _ = self.env.step(action)
             episode_count += 1
             obs = obs.transpose((2, 0, 1))
@@ -224,7 +225,7 @@ class DreamerTrainer(pl.LightningModule):
                 obs = self.env.reset()
                 initialize(obs)
                 episodes.append(episode_dict)
-            self.timesteps += 1
+            self.timesteps += 1 * self.config["dreamer"]["env_config"]["action_repeat"]
         return episodes
     
     def _collate_state(self, state):
@@ -238,6 +239,7 @@ class DreamerTrainer(pl.LightningModule):
         
     
     def _data_collect(self):
+        import cv2
         obs = self.env.reset()
         state = self.model.get_initial_state(self.device)
         episode_obs = [torch.FloatTensor(np.ascontiguousarray(obs.transpose((2, 0, 1))))]
@@ -257,6 +259,7 @@ class DreamerTrainer(pl.LightningModule):
             episode_done = [False]
             episode_count = 1
             episode_dict = {}
+        
         for i in range(self.config["dreamer"]["max_episode_length"] // self.config["dreamer"]["env_config"]["action_repeat"]):
             action, logp, state = self.action_sampler_fn(((episode_obs[-1] / 255.0) - 0.5).unsqueeze(0).to(self.device), episode_state[-1], 
                                         self.config["dreamer"]["explore_noise"], self.timesteps)
@@ -340,26 +343,29 @@ class DreamerTrainer(pl.LightningModule):
             for i in range(batch_size):
                 yield return_batch(i)
     
-    def action_sampler_fn(self, obs, state, explore, timestep):
+    def prefill_action_sampler_fn(self, obs, state, explore, timestep):
         """Action sampler function has two phases. During the prefill phase,
         actions are sampled uniformly [-1, 1]. During training phase, actions
         are evaluated through DreamerPolicy and an additive gaussian is added
         to incentivize exploration.
         """
         # Custom Exploration
-        if timestep <= int(self.config["dreamer"]["prefill_timesteps"] / self.config["dreamer"]["env_config"]["action_repeat"]):
-            logp = [0.0]
-            # Random action in space [-1.0, 1.0]
-            action = 2.0 * torch.rand(1, self.model.action_size) - 1.0
-            state = self.model.get_initial_state(self.device)
-        else:
+        # if timestep <= int(self.config["dreamer"]["prefill_timesteps"] / self.config["dreamer"]["env_config"]["action_repeat"]):
+        logp = [0.0]
+        # Random action in space [-1.0, 1.0]
+        action = 2.0 * torch.rand(1, self.model.action_size) - 1.0
+        state = self.model.get_initial_state(self.device)
+        return action, logp, state
+    
+    def action_sampler_fn(self, obs, state, explore, timestep):
+        # else:
             # Weird RLLib Handling, this happens when env rests
-            # if len(state[0].size()) == 3:
-            #     # Very hacky, but works on all envs
-            #     state = self.model.get_initial_state(self.device)
-            action, logp, state = self.model.policy(obs, state, explore)
-            action = Normal(action, self.config["dreamer"]["explore_noise"]).sample()
-            action = torch.clamp(action, min=-1.0, max=1.0)
+        # if len(state[0].size()) == 3:
+        #     # Very hacky, but works on all envs
+        #     state = self.model.get_initial_state(self.device)
+        action, logp, state = self.model.policy(obs, state, explore)
+        action = Normal(action, self.config["dreamer"]["explore_noise"]).sample()
+        action = torch.clamp(action, min=-1.0, max=1.0)
 
         return action, logp, state
     

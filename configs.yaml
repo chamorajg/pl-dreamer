@@ -12,9 +12,9 @@ trainer_params:
   val_check_interval: 5
   max_epochs: 1000
 dreamer:
-  td_model_lr: 6.0e-4
-  actor_lr: 8.0e-5
-  critic_lr: 8.0e-5
+  td_model_lr: 1.0e-3
+  actor_lr: 5.0e-4
+  critic_lr: 5.0e-4
   default_lr: 1.0e-5
   weight_decay: 1.0e-4
   discount: 0.99
@@ -27,6 +27,7 @@ dreamer:
   free_nats: 3.0
   kl_coeff: 1.0
   prefill_timesteps: 5000
+  prefill_episodes: 10
   explore_noise: 0.3
   max_episode_length: 1000
   collect_interval: 100

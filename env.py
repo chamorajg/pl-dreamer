@@ -63,6 +63,6 @@ if __name__ == '__main__':
     env = DMControlSuiteEnv("hopper_hop")
     obs = env.reset()
     action_space = env.action_space
-    print(action_space)
-    # cv2.imshow("Obs", cv2.resize(obs, (640, 640)))
-    # cv2.waitKey(0)
+    obs = cv2.cvtColor(obs, cv2.COLOR_BGR2RGB)
+    cv2.imshow("Obs", cv2.resize(obs, (640, 640)))
+    cv2.waitKey(0)
