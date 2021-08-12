@@ -1,3 +1,4 @@
+import os
 import copy
 import time
 import random
@@ -60,7 +61,7 @@ class DreamerTrainer(pl.LightningModule):
         self.batch_size = self.config["dreamer"]["batch_size"]
         self.action_space = len(self.config["dreamer"]["dreamer_model"]["action_space"])
         prefill_episodes = self._prefill_train_batch()
-        self._add(prefill_episodes)     
+        self._add(prefill_episodes)
 
     def compute_dreamer_loss(self,
                          obs,
@@ -203,8 +204,7 @@ class DreamerTrainer(pl.LightningModule):
             episode_count = 1
             episode_dict = {}
         
-        while len(episodes) < self.config["dreamer"]["prefill_episodes"]: 
-            #self.timesteps <= int(self.config["dreamer"]["prefill_timesteps"] / self.config["dreamer"]["env_config"]["action_repeat"]):    
+        while len(episodes) < self.config["dreamer"]["prefill_episodes"]:     
             action, logp, state = self.prefill_action_sampler_fn(obs, None, False, self.timesteps)
             obs, reward, done, _ = self.env.step(action)
             episode_count += 1
@@ -218,8 +218,7 @@ class DreamerTrainer(pl.LightningModule):
             if done:
                 episode_dict.update({'count': episode_count,
                                 'obs': torch.stack(episode_obs),
-                                'state': self._collate_state(episode_state),
-                                'action': torch.cat(episode_action, axis=0),
+                                'action': torch.cat(episode_action),
                                 'reward': torch.FloatTensor(episode_reward),
                                 'done': torch.BoolTensor(episode_done)})
                 obs = self.env.reset()
@@ -259,31 +258,29 @@ class DreamerTrainer(pl.LightningModule):
             episode_done = [False]
             episode_count = 1
             episode_dict = {}
-        
-        for i in range(self.config["dreamer"]["max_episode_length"] // self.config["dreamer"]["env_config"]["action_repeat"]):
+        max_len = self.config["dreamer"]["max_episode_length"] // self.config["dreamer"]["env_config"]["action_repeat"]
+        for i in range(max_len):
             action, logp, state = self.action_sampler_fn(((episode_obs[-1] / 255.0) - 0.5).unsqueeze(0).to(self.device), episode_state[-1], 
                                         self.config["dreamer"]["explore_noise"], self.timesteps)
             obs, reward, done, _ = self.env.step(action.detach().cpu().numpy())
             obs = obs.transpose((2, 0, 1))
             obs_tensor = torch.FloatTensor(np.ascontiguousarray(obs))
             episode_count += 1
-            episode_obs.append(obs_tensor.to(self.device))
+            episode_obs.append(obs_tensor)
             episode_action.append(action.detach().cpu())
             episode_done.append(done)
             episode_reward.append(reward)
             episode_state.append(state)
             self.timesteps += 1
-            if done:
+            if done or i == max_len - 1:
                 episode_dict.update({'count': episode_count,
-                                'state': self._collate_state(episode_state),
                                 'obs': torch.stack(episode_obs),
-                                'action': torch.stack(episode_action),
+                                'action': torch.cat(episode_action),
                                 'reward': torch.FloatTensor(episode_reward),
                                 'done': torch.BoolTensor(episode_done),
                                     })
                 episodes.append(episode_dict)
                 break
-            
         return episodes
 
     def _add(self, batch):
@@ -293,7 +290,13 @@ class DreamerTrainer(pl.LightningModule):
         if len(self.episodes) > self.max_length:
             remove_episode_index = len(self.episodes) - self.max_length
             self.episodes = self.episodes[remove_episode_index:]
-    
+        if self.config["dreamer"]["save_episodes"] and\
+            self.trainer is not None and self.trainer.log_dir is not None:
+            save_episodes = np.array(self.episodes)
+            if not os.path.exists(f'{self.trainer.log_dir}/episodes'):
+                os.makedirs(f'{self.trainer.log_dir}/episodes', exist_ok=True)
+            np.savez(f'{self.trainer.log_dir}/episodes/episodes.npz', save_episodes)
+
     def _sample(self, batch_size):
         episodes_buffer = [] #{"count": 0, "obs": [], "reward": [], "action": [], "done": []}
         while len(episodes_buffer) < batch_size:
@@ -305,7 +308,6 @@ class DreamerTrainer(pl.LightningModule):
             index = int(random.randint(0, available))
             episodes_buffer.append({"count": self.length,
                                     "obs": episode["obs"][index : index + self.length],
-                                    "state": [episode["state"][i][index : index + self.length] for i in range(4)],
                                     "action": episode["action"][index: index + self.length],
                                     "reward": episode["reward"][index: index + self.length],
                                     "done": episode["done"][index: index + self.length],
@@ -328,7 +330,7 @@ class DreamerTrainer(pl.LightningModule):
         for _ in range(self.config["dreamer"]["collect_interval"]):
             total_batch = self._sample(batch_size)
             def return_batch(i):
-                return total_batch["count"][i], (total_batch["obs"][i] / 255.0 - 0.5), [total_batch["state"][b][i] for b in range(4)],\
+                return total_batch["count"][i], (total_batch["obs"][i] / 255.0 - 0.5),\
                     total_batch["action"][i], total_batch["reward"][i], total_batch["done"][i]
             for i in range(batch_size):
                 yield return_batch(i)
@@ -338,7 +340,7 @@ class DreamerTrainer(pl.LightningModule):
         for _ in range(self.config["dreamer"]["collect_interval"]):
             total_batch = self._sample(batch_size)
             def return_batch(i):
-                return total_batch["count"][i], total_batch["obs"][i], [total_batch["state"][b][i] for b in range(4)],\
+                return total_batch["count"][i], total_batch["obs"][i],\
                     total_batch["action"][i], total_batch["reward"][i], total_batch["done"][i]
             for i in range(batch_size):
                 yield return_batch(i)
@@ -350,49 +352,43 @@ class DreamerTrainer(pl.LightningModule):
         to incentivize exploration.
         """
         # Custom Exploration
-        # if timestep <= int(self.config["dreamer"]["prefill_timesteps"] / self.config["dreamer"]["env_config"]["action_repeat"]):
         logp = [0.0]
         # Random action in space [-1.0, 1.0]
-        action = 2.0 * torch.rand(1, self.model.action_size) - 1.0
+        action = torch.FloatTensor(1, self.model.action_size).uniform_(-1.0, 1.0)
         state = self.model.get_initial_state(self.device)
         return action, logp, state
     
     def action_sampler_fn(self, obs, state, explore, timestep):
-        # else:
-            # Weird RLLib Handling, this happens when env rests
-        # if len(state[0].size()) == 3:
-        #     # Very hacky, but works on all envs
-        #     state = self.model.get_initial_state(self.device)
         action, logp, state = self.model.policy(obs, state, explore)
-        action = Normal(action, self.config["dreamer"]["explore_noise"]).sample()
+        action = Normal(action, explore).sample()
         action = torch.clamp(action, min=-1.0, max=1.0)
-
         return action, logp, state
     
     def training_step(self, batch, batch_idx):
-        count, obs, state, action, reward, _ = batch
-        state = self.model.dynamics.get_initial_state(obs.shape[0], self.device)
-        state = state + [action]
-        action, _, state = self.action_sampler_fn(obs, state, self.explore, self.timesteps)
+        count, obs, action, reward, _ = batch
         loss = self.dreamer_loss({"obs":obs, "actions":action, "rewards":reward, "log_gif": True})
+        self.log('model_loss', loss[0])
+        self.log('actor_loss', loss[1])
+        self.log('critic_loss', loss[2])
         return sum(list(loss))
     
     def training_epoch_end(self, outputs):
         with torch.no_grad():
             data_collection_episodes = self._data_collect()
             self._add(data_collection_episodes)
+            data_dict = data_collection_episodes[0]
+            self.log('avg_reward_collection', torch.mean(data_dict['reward']))
 
         if self.current_epoch > 0 and self.current_epoch % self.config["trainer_params"]["val_check_interval"] == 0:
             self.model.eval()
             test_data = self._data_collect()
+            test_dict = test_data[0]
+            self.log('avg_reward_test', torch.mean(test_dict['reward']))
             self.model.train()
         total_loss = 0
         for out in outputs:
             total_loss += out['loss'].item()       
         self.log('loss', total_loss)
-        
-    # def validation_step(self, batch, batch_idx):
-    #     return batch
     
     def _collate_fn(self, batch):
         return_batch = {}
@@ -407,12 +403,6 @@ class DreamerTrainer(pl.LightningModule):
         dataset = ExperienceSourceDataset(self._train_batch(self.batch_size))
         dataloader = DataLoader(dataset=dataset, batch_size=self.batch_size, pin_memory=True, num_workers=1)
         return dataloader
-    
-    # def val_dataloader(self) -> DataLoader:
-    #     """Get val loader"""
-    #     dataset = ExperienceSourceDataset(self._data_batch(1))
-    #     dataloader = DataLoader(dataset=dataset, batch_size=1, pin_memory=True)
-    #     return dataloader 
     
     def configure_optimizers(self,):
         encoder_weights = list(self.model.encoder.parameters())
@@ -434,12 +424,12 @@ class DreamerTrainer(pl.LightningModule):
         gif = gif.detach().cpu().numpy()
         gif = np.clip(255*gif, 0, 255).astype(np.uint8)
         B, T, C, H, W = gif.shape
-        frames = gif.transpose((1, 2, 3, 0, 4)).reshape((1, T, C, H, B * W)).squeeze(0)
+        frames = gif.transpose((1, 2, 3, 0, 4)).reshape((1, T, C, H, B * W))
+        frames = frames.squeeze(0)
         def display_image(frame):
             frame = frame.transpose((1, 2, 0))
             return Image.fromarray(frame)
         img, *imgs = [display_image(frame) for frame in list(frames)]
-        # with open('./')
         img.save(f'{self.trainer.log_dir}/movie_{self.current_epoch}.gif', format='GIF', append_images=imgs,
          save_all=True, loop=0)
         return frames
