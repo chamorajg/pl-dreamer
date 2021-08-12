@@ -2,4 +2,6 @@
 Simplistic Pytorch Lightning Implementation of the Dreamer-RL.
 
 #### Walker - Walk environment of Deep Mind control suite.
-![movie_480](https://user-images.githubusercontent.com/21273742/129223452-5ae1adc0-47ca-4a78-ba04-9d05491bfaa5.gif)
+![movie_479](https://user-images.githubusercontent.com/21273742/129223877-46a1d4b1-fd0f-40e0-8e7b-ceb11f5fa195.gif)
+
+![Dreamer - Paper](https://arxiv.org/pdf/1912.01603.pdf)
