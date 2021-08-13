@@ -1,8 +1,8 @@
 import yaml
+import os.path as osp
 import pytorch_lightning as pl
 from dreamer import DreamerTrainer
 from pytorch_lightning.callbacks import ModelCheckpoint
-# from pytorch_lightning.loggers import TensorBoardLogger
 
 def main():
     with open("configs.yaml", 'r') as stream:
@@ -18,7 +18,8 @@ def main():
                             save_on_train_epoch_end=config["ckpt_callback"]["save_on_train_epoch_end"],
                             )
     model = DreamerTrainer(config)
-    # logger = TensorBoardLogger('tb_logs', name='Dreamer')
+    if config["trainer_params"]["default_root_dir"] is None:
+        config["trainer_params"]["default_root_dir"] = osp.dirname(__file__)
     trainer = pl.Trainer(
                         default_root_dir=config["trainer_params"]["default_root_dir"],
                         gpus=config["trainer_params"]["gpus"],
@@ -26,7 +27,6 @@ def main():
                         callbacks=[ckpt_callback],
                         val_check_interval=config["trainer_params"]["val_check_interval"],
                         max_epochs=config["trainer_params"]["max_epochs"],
-                        # resume_from_checkpoint='/kaggle/pl-dreamer/lightning_logs/version_0/checkpoints/epoch=244-loss=1126585.38.ckpt',
                         )
     trainer.fit(model)
 

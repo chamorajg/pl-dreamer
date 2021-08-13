@@ -1,12 +1,12 @@
 name: Dreamer
-env: walker_walk
+env: walker_run
 ckpt_callback:
   save_top_k: 1
   mode: min
   monitor: loss
   save_on_train_epoch_end: True
 trainer_params:
-  default_root_dir: /kaggle/pl-dreamer
+  default_root_dir: None
   gpus: 1
   gradient_clip_val: 100.0
   val_check_interval: 5
