@@ -197,7 +197,7 @@ class DreamerTrainer(pl.LightningModule):
         while self.timesteps < self._prefill_timesteps: 
             action, logp, state = self.prefill_action_sampler_fn(None, 
                                                             self.timesteps)
-            obs, reward, done, _ = self.env.step(action.detach().cpu().numpy())
+            obs, reward, done, _ = self.env.step(action.numpy())
             episode.append((obs, action, reward, done))
             self.timesteps += self._action_repeat       
             if done or self.timesteps == self._prefill_timesteps - 1:
@@ -222,7 +222,7 @@ class DreamerTrainer(pl.LightningModule):
                     ((episode.obs[-1] / 255.0) - 0.5).unsqueeze(0).to(
                     self.device), state, self.explore, False)
             obs, reward, done, _ = self.env.step(action.detach().cpu().numpy())
-            episode.append((obs, action, reward, done))
+            episode.append((obs, action.detach().cpu(), reward, done))
             if done or i == max_len - 1:
                 episodes.append(episode.todict())
                 break
