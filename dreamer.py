@@ -204,7 +204,7 @@ class DreamerTrainer(pl.LightningModule):
                 episodes.append(episode.todict())
                 obs = self.env.reset() 
                 if done:
-                    episodes.reset(obs)
+                    episode.reset(obs)
         del episode
         return episodes        
     
@@ -226,7 +226,6 @@ class DreamerTrainer(pl.LightningModule):
             if done or i == max_len - 1:
                 episodes.append(episode.todict())
                 break
-        
         del episode
         return episodes
     

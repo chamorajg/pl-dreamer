@@ -23,7 +23,7 @@ dreamer:
   batch_length: 50
   length: 50
   prefill_timesteps: 5000
-  explore_noise: 0.5
+  explore_noise: 0.3
   max_episode_length: 1000
   collect_interval: 100
   max_experience_size: 1000

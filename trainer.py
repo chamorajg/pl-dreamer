@@ -11,7 +11,7 @@ def main():
             config = yaml.safe_load(stream)
         except yaml.YAMLError as exc:
             print(exc)
-    pl.seed_everything(config.seed)
+    pl.seed_everything(config["seed"])
     ckpt_callback = ModelCheckpoint(
                             filename='{epoch}-{loss:.2f}',
                             save_top_k=config["ckpt_callback"]["save_top_k"],
