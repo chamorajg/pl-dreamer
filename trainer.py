@@ -1,3 +1,4 @@
+import os
 import yaml
 import os.path as osp
 import pytorch_lightning as pl
@@ -10,6 +11,7 @@ def main():
             config = yaml.safe_load(stream)
         except yaml.YAMLError as exc:
             print(exc)
+    pl.seed_everything(config.seed)
     ckpt_callback = ModelCheckpoint(
                             filename='{epoch}-{loss:.2f}',
                             save_top_k=config["ckpt_callback"]["save_top_k"],
@@ -18,7 +20,7 @@ def main():
                             save_on_train_epoch_end=config["ckpt_callback"]["save_on_train_epoch_end"],
                             )
     model = DreamerTrainer(config)
-    if config["trainer_params"]["default_root_dir"] is None:
+    if config["trainer_params"]["default_root_dir"] == "None":
         config["trainer_params"]["default_root_dir"] = osp.dirname(__file__)
     trainer = pl.Trainer(
                         default_root_dir=config["trainer_params"]["default_root_dir"],
@@ -28,6 +30,7 @@ def main():
                         val_check_interval=config["trainer_params"]["val_check_interval"],
                         max_epochs=config["trainer_params"]["max_epochs"],
                         )
+    os.makedirs(f'{trainer.log_dir}/movies', exist_ok=True)
     trainer.fit(model)
 
 if __name__ == '__main__':

@@ -15,8 +15,8 @@ class TanhBijector(torch.distributions.Transform):
     def __init__(self):
         super().__init__()
         self.bijective = True
-        self.domain = torch.distributions.constraints.real #Constraint(False)
-        self.codomain = torch.distributions.constraints.real #Constraint(False)
+        self.domain = torch.distributions.constraints.real
+        self.codomain = torch.distributions.constraints.interval(-1.0, 1.0)
 
     @property
     def sign(self): return 1.
@@ -296,6 +296,12 @@ class RSSM(nn.Module):
         """
         if state is None:
             state = self.get_initial_state(action.size()[0])
+        
+        if embed.dim() <= 2:
+            embed = torch.unsqueeze(embed, 1)
+
+        if action.dim() <= 2:
+            action = torch.unsqueeze(action, 1)
 
         embed = embed.permute(1, 0, 2)
         action = action.permute(1, 0, 2)
@@ -431,24 +437,26 @@ class PLANet(nn.Module):
         and policy to obtain action.
         """
         if state is None:
-            self.initial_state()
+            self.state = self.get_initial_state(batch_size=obs.shape[0])
         else:
             self.state = state
         post = self.state[:4]
         action = self.state[4]
 
         embed = self.encoder(obs)
-        
-        if len(embed.size()) == 2:
-            post, _ = self.dynamics.obs_step(post, action, embed)
-        else:
-            post, _ = self.dynamics.observe(embed, action, post)
+        post, _ = self.dynamics.obs_step(post, action, embed)
         feat = self.dynamics.get_feature(post)
+
         action_dist = self.actor(feat)
         if explore:
             action = action_dist.sample()
         else:
-            action = action_dist.mean
+            samples = []
+            for _ in range(1000):
+                samples.append(action_dist.sample())
+            action = torch.mean(torch.cat(samples), dim=0)
+            if action.ndim == 1:
+                action = action.unsqueeze(0)
         logp = action_dist.log_prob(action)
 
         self.state = post + [action]

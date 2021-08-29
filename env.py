@@ -7,8 +7,11 @@ class DMControlSuiteEnv:
 
     def __init__(self, 
                 name: str, 
+                max_episode_length: int = 1000,
+                action_repeat:int = 2,
                 size: Tuple[int] = (64, 64),
-                camera: Optional[Any] = None):
+                camera: Optional[Any] = None,
+                ):
         domain, task = name.split('_', 1)
         if domain == 'cup':
             domain = 'ball_in_cup'
@@ -22,6 +25,9 @@ class DMControlSuiteEnv:
         if camera is None:
             camera = dict(quadruped=2).get(domain, 0)
         self._camera = camera
+        self._step = 0
+        self._max_episode_length = 1000
+        self._action_repeat = action_repeat
     
     @property
     def observation_space(self):
@@ -39,16 +45,23 @@ class DMControlSuiteEnv:
         return gym.spaces.Box(spec.minimum, spec.maximum, dtype=np.float32)
 
     def step(self, action):
-        time_step = self._env.step(action)
-        obs = dict(time_step.observation)
-        obs['image'] = self.render()
-        reward = time_step.reward or 0
-        done = time_step.last()
+        reward = 0
+        obs = None
+        for k in range(self._action_repeat):
+            time_step = self._env.step(action)
+            self._step += 1
+            obs = dict(time_step.observation)
+            obs['image'] = self.render()
+            reward += time_step.reward or 0
+            done = time_step.last() or self._step == self._max_episode_length
+            if done:
+                break
         info = {'discount': np.array(time_step.discount, np.float32)}
         return obs["image"], reward, done, info
 
     def reset(self):
         time_step = self._env.reset()
+        self._step = 0
         obs = dict(time_step.observation)
         obs['image'] = self.render()
         return obs["image"]
@@ -60,9 +73,10 @@ class DMControlSuiteEnv:
 
 if __name__ == '__main__':
     import cv2
-    env = DMControlSuiteEnv("hopper_hop")
+    env = DMControlSuiteEnv("acrobot_swingup")
     obs = env.reset()
     action_space = env.action_space
     obs = cv2.cvtColor(obs, cv2.COLOR_BGR2RGB)
-    cv2.imshow("Obs", cv2.resize(obs, (640, 640)))
-    cv2.waitKey(0)
+    # cv2.imshow("Obs", cv2.resize(obs, (640, 640)))
+    # cv2.waitKey(0)
+    env.step(0.2)
