@@ -189,7 +189,7 @@ class DreamerTrainer(pl.LightningModule):
     def _prefill_train_batch(self, ):
         """ Prefill episodes before the training begins."""
         
-        self.timesteps = 0
+        self.timesteps = 2
         obs = self.env.reset()
         episode = Episode(obs, self.action_space)
         episodes = []
@@ -213,7 +213,7 @@ class DreamerTrainer(pl.LightningModule):
         
         obs = self.env.reset()
         state = self.model.get_initial_state(self.device)
-        episode = Episode(obs)
+        episode = Episode(obs, self.action_space)
         episodes = []
         
         max_len = self._max_episode_length // self._action_repeat

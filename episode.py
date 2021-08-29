@@ -10,9 +10,11 @@ class Episode(object):
     
     def __init__(self,
                 obs:TensorType,
-                action_space:int = 1) -> None:
+                action_space: int = 1,
+                action_repeat: int = 2) -> None:
         """Initializes a list of all episode attributes"""
         self.action_space = action_space
+        self.action_repeat = action_repeat
         obs = torch.FloatTensor(np.ascontiguousarray(obs.transpose
                                                         ((2, 0, 1))))
         self.t = 1
