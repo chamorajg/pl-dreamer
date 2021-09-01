@@ -1,7 +1,6 @@
 # Pytorch Lightning - Dreamer
 Pytorch Lightning Implementation of the Dreamer-RL.
 
-#### Walker - Walk environment of Deep Mind control suite.
 | Deepmind Control Suite Environment |    GIF                                                                  | Avg Reward while testing|
 |-----|-------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------|
 |Walker - Walk|![movie_479](https://user-images.githubusercontent.com/21273742/129223877-46a1d4b1-fd0f-40e0-8e7b-ceb11f5fa195.gif)| Each episode contains 1000 steps, per episode reward = avg reward per step * 1000 <img src="https://user-images.githubusercontent.com/21273742/129224392-50945b1d-7594-4c67-b76e-e4e859684c43.jpg" width="400" height="250">|
