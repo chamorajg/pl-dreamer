@@ -1,5 +1,5 @@
 name: Dreamer
-env: acrobot_swingup
+env: quadruped_run
 seed: 42
 ckpt_callback:
   save_top_k: 2
@@ -39,7 +39,6 @@ dreamer:
 
   dreamer_model:
       obs_space: [3, 64, 64]
-      action_space: [0]
       num_outputs: 1
       custom_model: DreamerModel
       deter_size: 200
