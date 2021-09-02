@@ -48,8 +48,9 @@ class DreamerTrainer(pl.LightningModule):
         self.env = DMControlSuiteEnv(name=self.config["env"], 
                                 max_episode_length=self.config["dreamer"]["max_episode_length"],
                                 action_repeat=self.config["dreamer"]["env_config"]["action_repeat"])
+        sample_action_space = np.zeros(self.env.action_space.shape)
         self.model = PLANet(self.config["dreamer"]["dreamer_model"]['obs_space'], 
-                            np.array(self.config["dreamer"]["dreamer_model"]['action_space']), 
+                            sample_action_space, 
                             self.config["dreamer"]["dreamer_model"]['num_outputs'], 
                             self.config["dreamer"]["dreamer_model"],
                             self.config['name'])
@@ -63,7 +64,7 @@ class DreamerTrainer(pl.LightningModule):
 
         self.explore = self.config["dreamer"]['explore_noise']
         self.batch_size = self.config["dreamer"]["batch_size"]
-        self.action_space = np.array(self.config["dreamer"]["dreamer_model"]["action_space"]).shape[0]
+        self.action_space = sample_action_space.shape[0]
         prefill_episodes = self._prefill_train_batch()
         self._add(prefill_episodes)
 
