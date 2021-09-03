@@ -26,7 +26,7 @@ class DMControlSuiteEnv:
             camera = dict(quadruped=2).get(domain, 0)
         self._camera = camera
         self._step = 0
-        self._max_episode_length = 1000
+        self._max_episode_length = max_episode_length
         self._action_repeat = action_repeat
     
     @property
