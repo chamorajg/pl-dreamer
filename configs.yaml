@@ -1,17 +1,21 @@
 name: Dreamer
 env: quadruped_run
 seed: 42
+
 ckpt_callback:
   save_top_k: 2
   mode: min
   monitor: loss
   save_on_train_epoch_end: True
-trainer_params:
+  save_last: True
+
+  trainer_params:
   default_root_dir: None
   gpus: 1
   gradient_clip_val: 100.0
   val_check_interval: 5
   max_epochs: 1000
+
 dreamer:
   td_model_lr: 5.0e-4
   actor_lr: 8.0e-5
@@ -38,13 +42,14 @@ dreamer:
   kl_coeff: 1.0
 
   dreamer_model:
-      obs_space: [3, 64, 64]
-      num_outputs: 1
-      custom_model: DreamerModel
-      deter_size: 200
-      stoch_size: 30
-      depth_size: 32
-      hidden_size: 400
-      action_init_std: 5.0
+    obs_space: [3, 64, 64]
+    num_outputs: 1
+    custom_model: DreamerModel
+    deter_size: 200
+    stoch_size: 30
+    depth_size: 32
+    hidden_size: 400
+    action_init_std: 5.0
+  
   env_config:
-      action_repeat: 2
+    action_repeat: 2

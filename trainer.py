@@ -18,6 +18,7 @@ def main():
                             monitor=config["ckpt_callback"]["monitor"],
                             mode=config["ckpt_callback"]["mode"],
                             save_on_train_epoch_end=config["ckpt_callback"]["save_on_train_epoch_end"],
+                            save_last=config["ckpt_callback"]["save_last"],
                             )
     model = DreamerTrainer(config)
     if config["trainer_params"]["default_root_dir"] == "None":
