@@ -1,9 +1,9 @@
 dm_control==0.0.364896371
-pytorch_lightning==1.4.1
+pytorch_lightning==2.5.1
 opencv_python_headless==4.3.0.36
 numpy>=1.22.0
 gym==0.18.3
-torch==1.9.0
+torch>=2.6.0
 tqdm==4.62.0
 Pillow>=9.0.0
 PyYAML==5.4.1
