@@ -4,6 +4,6 @@ opencv_python_headless==4.3.0.36
 numpy>=1.22.0
 gym==0.18.3
 torch>=2.6.0
-tqdm==4.62.0
+tqdm>=4.66.3
 Pillow>=9.0.0
 PyYAML==5.4.1
